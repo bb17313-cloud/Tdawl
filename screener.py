@@ -3,6 +3,7 @@ Saudi Stock Screener - للتشغيل مرة واحدة (GitHub Actions)
 """
 
 import os
+import json
 import requests
 import pandas as pd
 from datetime import datetime, time
@@ -237,8 +238,8 @@ def _tr(value, mapping):
 
 
 def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
-    try:
-        _, df = (
+    def _scan(lang: Optional[str]):
+        q = (
             Query()
             .set_markets("ksa")
             .select("name", "description", "close", "change", "volume",
@@ -247,8 +248,17 @@ def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
                     "price_52_week_low", "Low.All")
             .order_by("volume", ascending=False)
             .limit(limit)
-            .get_scanner_data()
         )
+        if lang:
+            q = q.set_property("options", {"lang": lang})
+        return q.get_scanner_data()
+
+    try:
+        try:
+            _, df = _scan("ar")
+        except Exception as e:
+            logger.warning(f"Arabic scan failed, retrying default language: {e}")
+            _, df = _scan(None)
     except Exception as e:
         logger.warning(f"TradingView scanner failed: {e}")
         return []
@@ -362,24 +372,55 @@ def run_screener() -> pd.DataFrame:
     return df
 
 
-def format_message(df: pd.DataFrame) -> Optional[str]:
+STATE_FILE = "alerts_count.json"
+
+
+def _today_riyadh() -> str:
+    return datetime.now(pytz.timezone("Asia/Riyadh")).strftime("%Y-%m-%d")
+
+
+def load_counts() -> Dict[str, int]:
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if state.get("date") == _today_riyadh():
+            return state.get("counts", {})
+    except Exception:
+        pass
+    return {}
+
+
+def save_counts(counts: Dict[str, int]):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": _today_riyadh(), "counts": counts}, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Could not save alert counts: {e}")
+
+
+def format_message(df: pd.DataFrame, counts: Optional[Dict[str, int]] = None) -> Optional[str]:
     if df.empty:
         return None
+
+    if counts is None:
+        counts = {}
 
     msg = f"🇸🇦 *تنبيهات السوق السعودي*\n"
     msg += f"⏰ {get_riyadh_time()}\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    for i, row in enumerate(df.itertuples(), 1):
+    for row in df.itertuples():
         tv_link = f"https://www.tradingview.com/chart/?symbol=TADAWUL:{row.Symbol}"
 
-        msg += f"🔔 *تنبيه #{i}*\n"
+        counts[row.Symbol] = counts.get(row.Symbol, 0) + 1
+
+        msg += f"🔔 *تنبيه #{counts[row.Symbol]}*\n"
         msg += f"الرمز: `{row.Symbol}`\n"
-        msg += f"الاسم: {row.Name}\n"
-        msg += f"القطاع: `{row.Sector or '-'}`\n"
-        msg += f"الصناعة: `{row.Industry or '-'}`\n"
         msg += f"السعر الحالي: `{row.Price:.2f}`\n"
         msg += f"نسبة التغيير: `{row.Change_Pct:+.2f}%`\n"
+        msg += f"{row.Name}\n"
+        msg += f"القطاع: `{row.Sector or '-'}`\n"
+        msg += f"الصناعة: `{row.Industry or '-'}`\n"
         msg += f"الحجم: `{row.Volume:,}`\n"
         extra = _CACHE.get(row.Symbol, {})
 
@@ -435,10 +476,12 @@ def main():
 
     logger.info(f"Starting scan at {get_riyadh_time()}")
     df = run_screener()
-    msg = format_message(df)
+    counts = load_counts()
+    msg = format_message(df, counts)
 
     if msg:
         send_telegram(msg)
+        save_counts(counts)
         logger.info(f"Found {len(df)} stocks and sent to Telegram")
     else:
         logger.info("No stocks matched criteria.")
