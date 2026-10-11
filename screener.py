@@ -232,14 +232,34 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
 
 def send_telegram(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
-    r = requests.post(url, json=payload, timeout=15)
-    r.raise_for_status()
+    sep = "────────────────────\n\n"
+
+    chunks, current = [], ""
+    for block in text.split(sep):
+        if not block.strip():
+            continue
+        part = block + sep
+        if len(current) + len(part) > 3800:
+            chunks.append(current)
+            current = ""
+        current += part
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": chunk,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code == 400:
+            logger.warning(f"Telegram 400: {r.text}")
+            payload.pop("parse_mode")
+            r = requests.post(url, json=payload, timeout=15)
+        r.raise_for_status()
+        time_module.sleep(1)
     logger.info("Message sent to Telegram successfully")
 
 
