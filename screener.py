@@ -19,9 +19,9 @@ API_KEY = os.getenv("API_KEY")
 BASE_URL = "https://api.sahmk.sa/api/v1"
 HEADERS = {"X-API-Key": API_KEY}
 
-# ====================== معايير الفحص (تم التخفيف لتمرير كل الأسهم الصاعدة) ======================
+# ====================== معايير الفحص ======================
 MIN_CHANGE_PERCENT = 0.5    # الحد الأدنى لنسبة الارتفاع (0.5%)
-MIN_RVOL = 0.1              # تم تخفيض الحجم النسبي لتمرير أغلب الأسهم النشطة
+MIN_RVOL = 0.1              # تخفيض الحجم النسبي لتمرير أغلب الأسهم النشطة
 MIN_CURRENT_VOLUME = 10_000 # الحد الأدنى لحجم التداول
 MIN_PRICE = 1.0             # الحد الأدنى للسعر
 
@@ -122,7 +122,6 @@ def run_screener() -> pd.DataFrame:
             avg_vol = get_avg_volume(symbol)
             rvol = (volume / avg_vol) if avg_vol and avg_vol > 0 else None
             
-            # إذا تعذر حساب RVOL أو كان أرقامًا منخفضة، سيتم قبوله بسبب تخفيف التصفية
             if rvol is not None and rvol < MIN_RVOL:
                 continue
 
@@ -158,7 +157,6 @@ def run_screener() -> pd.DataFrame:
 
     df = pd.DataFrame(results)
     if not df.empty:
-        # ترتيب الأسهم حسب الأعلى ارتفاعاً لترتيب التنبيهات
         df = df.sort_values("Change_Pct", ascending=False)
     return df
 
@@ -172,7 +170,8 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
     for i, row in enumerate(df.itertuples(), 1):
-        tv_link = f"https://www.tradingview.com/symbols/TADAWUL-{row.Symbol}/"
+        # رابط الشارت المباشر والتفاعلي تماماً مثل البوت الآخر
+        tv_link = f"https://www.tradingview.com/chart/?symbol=TADAWUL:{row.Symbol}"
 
         msg += f"🔔 *تنبيه #{i}*\n"
         msg += f"الرمز: `{row.Symbol}`\n"
@@ -182,7 +181,7 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
         msg += f"السعر الحالي: `{row.Price:.2f}`\n"
         msg += f"نسبة التغيير: `{row.Change_Pct:+.2f}%`\n"
         msg += f"الحجم: `{row.Volume:,}`\n"
-        msg += f"[TradingView]({tv_link})\n"
+        msg += f"[شارت TradingView]({tv_link})\n"
         msg += "────────────────────\n\n"
 
     return msg
