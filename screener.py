@@ -10,6 +10,7 @@ import pytz
 import logging
 import time as time_module
 from typing import List, Dict, Optional
+from tradingview_screener import Query
 
 # ====================== الإعدادات من Secrets ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -76,69 +77,63 @@ def safe_get(url: str, params: Optional[Dict] = None, timeout: int = 15) -> Opti
     return None
 
 
+# ====================== مصدر البيانات: TradingView ======================
+_CACHE: Dict[str, Dict] = {}
+
+
+def _clean(v):
+    return None if v is None or (isinstance(v, float) and pd.isna(v)) else v
+
+
 def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
-    url = f"{BASE_URL}/market/volume/"
-    params = {"limit": limit, "index": "TASI"}
-    
-    r = safe_get(url, params=params)
-    if not r or r.status_code != 200:
-        logger.warning(f"Could not fetch market volume leaders. Status: {r.status_code if r else 'No response'}")
-        return []
-        
     try:
-        data = r.json()
-        if isinstance(data, dict):
-            for key in ["stocks", "results", "data", "items", "list", "content"]:
-                if key in data and isinstance(data[key], list):
-                    return data[key]
-            logger.warning(f"Unexpected API response structure: {list(data.keys())}")
-            return []
-        return data if isinstance(data, list) else []
+        _, df = (
+            Query()
+            .set_markets("ksa")
+            .select("name", "description", "close", "change", "volume",
+                    "average_volume_30d_calc", "sector", "industry")
+            .order_by("volume", ascending=False)
+            .limit(limit)
+            .get_scanner_data()
+        )
     except Exception as e:
-        logger.warning(f"Error parsing market volume leaders: {e}")
+        logger.warning(f"TradingView scanner failed: {e}")
         return []
+
+    leaders = []
+    for _, r in df.iterrows():
+        symbol = str(r["name"])
+        _CACHE[symbol] = {
+            "name": _clean(r.get("description")) or symbol,
+            "price": _clean(r.get("close")) or 0,
+            "change_percent": _clean(r.get("change")) or 0,
+            "volume": _clean(r.get("volume")) or 0,
+            "avg_volume": _clean(r.get("average_volume_30d_calc")),
+            "sector": _clean(r.get("sector")) or "",
+            "industry": _clean(r.get("industry")) or "",
+        }
+        leaders.append({"symbol": symbol})
+    return leaders
 
 
 def get_quote(symbol: str) -> Optional[Dict]:
-    url = f"{BASE_URL}/quote/{symbol}/"
-    r = safe_get(url, timeout=10)
-    if r and r.status_code == 200:
-        return r.json()
-    return None
+    d = _CACHE.get(symbol)
+    if not d:
+        return None
+    return {"name": d["name"], "price": d["price"],
+            "change_percent": d["change_percent"], "volume": d["volume"]}
 
 
 def get_company(symbol: str) -> Optional[Dict]:
-    url = f"{BASE_URL}/company/{symbol}/"
-    r = safe_get(url, timeout=10)
-    if r and r.status_code == 200:
-        return r.json()
-    return None
+    d = _CACHE.get(symbol)
+    if not d:
+        return None
+    return {"sector_name": d["sector"], "industry": d["industry"]}
 
 
 def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
-    url = f"{BASE_URL}/historical/{symbol}/"
-    params = {"interval": "1d", "limit": days + 5}
-    r = safe_get(url, params=params, timeout=15)
-    if not r or r.status_code != 200:
-        return None
-    
-    try:
-        data = r.json()
-        bars = []
-        if isinstance(data, dict):
-            for key in ["data", "results", "items", "candles", "history"]:
-                if key in data and isinstance(data[key], list):
-                    bars = data[key]
-                    break
-        elif isinstance(data, list):
-            bars = data
-
-        if not bars or len(bars) < 5:
-            return None
-        volumes = [b.get("volume", 0) for b in bars[-days:] if isinstance(b, dict) and b.get("volume")]
-        return sum(volumes) / len(volumes) if volumes else None
-    except Exception:
-        return None
+    d = _CACHE.get(symbol)
+    return d["avg_volume"] if d else None
 
 
 def run_screener() -> pd.DataFrame:
