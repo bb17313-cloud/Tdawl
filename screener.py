@@ -46,7 +46,15 @@ def get_market_volume_leaders(limit: int = 80) -> List[Dict]:
     r = requests.get(url, headers=HEADERS, params=params, timeout=15)
     r.raise_for_status()
     data = r.json()
-    return data.get("results", data) if isinstance(data, dict) else data
+    
+    # استخراج البيانات بشكل مرن بغض النظر عن اسم مفتاح القائمة في الـ API
+    if isinstance(data, dict):
+        for key in ["results", "data", "items", "list", "content"]:
+            if key in data and isinstance(data[key], list):
+                return data[key]
+        logger.warning(f"Unexpected API response structure: {list(data.keys())}")
+        return []
+    return data if isinstance(data, list) else []
 
 
 def get_quote(symbol: str) -> Optional[Dict]:
@@ -68,17 +76,32 @@ def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
     if r.status_code != 200:
         return None
     data = r.json()
-    bars = data.get("data") or data.get("results") or data
+    
+    bars = []
+    if isinstance(data, dict):
+        for key in ["data", "results", "items", "candles", "history"]:
+            if key in data and isinstance(data[key], list):
+                bars = data[key]
+                break
+    elif isinstance(data, list):
+        bars = data
+
     if not bars or len(bars) < 5:
         return None
-    volumes = [b.get("volume", 0) for b in bars[-days:] if b.get("volume")]
+    volumes = [b.get("volume", 0) for b in bars[-days:] if isinstance(b, dict) and b.get("volume")]
     return sum(volumes) / len(volumes) if volumes else None
 
 
 def run_screener() -> pd.DataFrame:
     results = []
     leaders = get_market_volume_leaders(limit=80)
-    symbols = [item["symbol"] for item in leaders if "symbol" in item]
+    
+    if not leaders:
+        logger.warning("No leaders returned from API or empty list.")
+        return pd.DataFrame()
+
+    symbols = [item.get("symbol") or item.get("code") for item in leaders if isinstance(item, dict)]
+    symbols = [s for s in symbols if s]  # تصفية القيم الفارغة
 
     logger.info(f"Scanning {len(symbols)} symbols...")
 
@@ -88,10 +111,10 @@ def run_screener() -> pd.DataFrame:
             if not quote:
                 continue
 
-            change_pct = quote.get("change_percent") or 0
+            change_pct = quote.get("change_percent") or quote.get("changePercent") or 0
             volume = quote.get("volume") or 0
-            price = quote.get("price") or 0
-            name = quote.get("name") or quote.get("name_en") or ""
+            price = quote.get("price") or quote.get("close") or 0
+            name = quote.get("name") or quote.get("name_ar") or quote.get("name_en") or symbol
 
             if price <= MIN_PRICE or volume < MIN_CURRENT_VOLUME or change_pct < MIN_CHANGE_PERCENT:
                 continue
@@ -120,7 +143,7 @@ def run_screener() -> pd.DataFrame:
                 "Sector": sector,
                 "Industry": industry,
                 "Price": price,
-                "Change%": change_pct,
+                "Change_Pct": change_pct, # تم تعديل الاسم لتجنب مشاكل الرموز الخاصة
                 "Volume": volume,
                 "RVOL": rvol,
             })
@@ -154,7 +177,7 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
         msg += f"القطاع: {row.Sector or '-'}\n"
         msg += f"الصناعة: {row.Industry or '-'}\n"
         msg += f"السعر الحالي: `{row.Price:.2f}`\n"
-        msg += f"نسبة التغيير من الافتتاح: `{row._5:+.2f}%`\n"
+        msg += f"نسبة التغيير من الافتتاح: `{row.Change_Pct:+.2f}%`\n"
         msg += f"Vol: `{row.Volume:,}`\n"
         msg += f"[TradingView]({tv_link})\n"
         msg += "────────────────────\n\n"
@@ -188,8 +211,8 @@ def main():
         logger.info(f"Found {len(df)} stocks")
     else:
         logger.info("No stocks matched the criteria")
-        # يمكنك إلغاء التعليق إذا تبي رسالة حتى لو ما فيه أسهم
-        # send_telegram(f"⏳ لا توجد أسهم تطابق المعايير\n⏰ {get_riyadh_time()}")
+        # إذا أردت وصول إشعار حتى لو لم تطابق أي سهم الشروط، قم بإلغاء التفعيل أدناه:
+        # send_telegram(f"⏳ لا توجد أسهم تطابق المعايير حالياً\n⏰ {get_riyadh_time()}")
 
 
 if __name__ == "__main__":
