@@ -19,11 +19,11 @@ API_KEY = os.getenv("API_KEY")
 BASE_URL = "https://api.sahmk.sa/api/v1"
 HEADERS = {"X-API-Key": API_KEY}
 
-# ====================== معايير الفحص ======================
-MIN_CHANGE_PERCENT = 0.5   # يمكنك تعديل النسبة حسب رغبتك
-MIN_RVOL = 0.8
-MIN_CURRENT_VOLUME = 50_000
-MIN_PRICE = 1.0
+# ====================== معايير الفحص (تم التخفيف لتمرير كل الأسهم الصاعدة) ======================
+MIN_CHANGE_PERCENT = 0.5    # الحد الأدنى لنسبة الارتفاع (0.5%)
+MIN_RVOL = 0.1              # تم تخفيض الحجم النسبي لتمرير أغلب الأسهم النشطة
+MIN_CURRENT_VOLUME = 10_000 # الحد الأدنى لحجم التداول
+MIN_PRICE = 1.0             # الحد الأدنى للسعر
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def is_market_open() -> bool:
 
 
 def get_market_volume_leaders(limit: int = 350) -> List[Dict]:
-    """جلب قائمة الأسهم من السوق السعودي (تضم أكثر من 350 شركة)"""
+    """جلب أسهم السوق السعودي"""
     url = f"{BASE_URL}/market/volume/"
     params = {"limit": limit, "index": "TASI"}
     r = requests.get(url, headers=HEADERS, params=params, timeout=20)
@@ -94,7 +94,6 @@ def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
 
 def run_screener() -> pd.DataFrame:
     results = []
-    # جلب حتى 350 شركة لتغطية كامل السوق السعودي
     leaders = get_market_volume_leaders(limit=350)
     
     if not leaders:
@@ -123,6 +122,7 @@ def run_screener() -> pd.DataFrame:
             avg_vol = get_avg_volume(symbol)
             rvol = (volume / avg_vol) if avg_vol and avg_vol > 0 else None
             
+            # إذا تعذر حساب RVOL أو كان أرقامًا منخفضة، سيتم قبوله بسبب تخفيف التصفية
             if rvol is not None and rvol < MIN_RVOL:
                 continue
 
@@ -150,7 +150,7 @@ def run_screener() -> pd.DataFrame:
                 "RVOL": rvol or 1.0,
             })
 
-            time_module.sleep(0.15) # تقليل الفاصل الزمني لاستيعاب الفحص الشامل
+            time_module.sleep(0.10)
 
         except Exception as e:
             logger.warning(f"{symbol}: {e}")
@@ -158,7 +158,8 @@ def run_screener() -> pd.DataFrame:
 
     df = pd.DataFrame(results)
     if not df.empty:
-        df = df.sort_values("RVOL", ascending=False)
+        # ترتيب الأسهم حسب الأعلى ارتفاعاً لترتيب التنبيهات
+        df = df.sort_values("Change_Pct", ascending=False)
     return df
 
 
