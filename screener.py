@@ -85,13 +85,166 @@ def _clean(v):
     return None if v is None or (isinstance(v, float) and pd.isna(v)) else v
 
 
+SECTOR_AR = {
+    "Finance": "المالية",
+    "Energy Minerals": "المعادن والطاقة",
+    "Non-Energy Minerals": "المعادن غير الطاقية",
+    "Process Industries": "الصناعات التحويلية",
+    "Utilities": "المرافق العامة",
+    "Communications": "الاتصالات",
+    "Consumer Non-Durables": "السلع الاستهلاكية غير المعمرة",
+    "Consumer Durables": "السلع الاستهلاكية المعمرة",
+    "Consumer Services": "الخدمات الاستهلاكية",
+    "Distribution Services": "خدمات التوزيع",
+    "Electronic Technology": "التقنية الإلكترونية",
+    "Health Services": "الخدمات الصحية",
+    "Health Technology": "التقنية الصحية",
+    "Industrial Services": "الخدمات الصناعية",
+    "Miscellaneous": "متنوعة",
+    "Producer Manufacturing": "التصنيع",
+    "Retail Trade": "تجارة التجزئة",
+    "Technology Services": "الخدمات التقنية",
+    "Transportation": "النقل",
+    "Commercial Services": "الخدمات التجارية",
+}
+
+INDUSTRY_AR = {
+    "Major Banks": "البنوك الكبرى",
+    "Regional Banks": "البنوك الإقليمية",
+    "Savings Banks": "بنوك الادخار",
+    "Financial Conglomerates": "المجموعات المالية",
+    "Investment Banks/Brokers": "بنوك الاستثمار والوساطة",
+    "Investment Managers": "إدارة الاستثمار",
+    "Investment Trusts/Mutual Funds": "صناديق الاستثمار",
+    "Finance/Rental/Leasing": "التمويل والتأجير",
+    "Financial Publishing/Services": "الخدمات المالية",
+    "Life/Health Insurance": "التأمين الصحي وعلى الحياة",
+    "Multi-Line Insurance": "التأمين متعدد الخطوط",
+    "Property/Casualty Insurance": "تأمين الممتلكات والحوادث",
+    "Specialty Insurance": "التأمين المتخصص",
+    "Insurance Brokers/Services": "وساطة وخدمات التأمين",
+    "Managed Health Care": "الرعاية الصحية المُدارة",
+    "Real Estate Development": "التطوير العقاري",
+    "Real Estate Investment Trusts": "صناديق الريت العقارية",
+    "Homebuilding": "بناء المساكن",
+    "Oil & Gas Production": "إنتاج النفط والغاز",
+    "Oil Refining/Marketing": "تكرير وتسويق النفط",
+    "Oil & Gas Pipelines": "أنابيب النفط والغاز",
+    "Oilfield Services/Equipment": "خدمات ومعدات حقول النفط",
+    "Contract Drilling": "الحفر التعاقدي",
+    "Integrated Oil": "النفط المتكامل",
+    "Coal": "الفحم",
+    "Alternative Power Generation": "توليد الطاقة البديلة",
+    "Chemicals: Specialty": "الكيماويات المتخصصة",
+    "Chemicals: Major Diversified": "الكيماويات المتنوعة",
+    "Chemicals: Agricultural": "الكيماويات الزراعية",
+    "Industrial Specialties": "المنتجات الصناعية المتخصصة",
+    "Building Products": "منتجات البناء",
+    "Construction Materials": "مواد البناء",
+    "Engineering & Construction": "الهندسة والمقاولات",
+    "Steel": "الحديد والصلب",
+    "Aluminum": "الألمنيوم",
+    "Other Metals/Minerals": "معادن أخرى",
+    "Precious Metals": "المعادن الثمينة",
+    "Forest Products": "منتجات الغابات",
+    "Pulp & Paper": "الورق واللب",
+    "Containers/Packaging": "العبوات والتغليف",
+    "Electric Utilities": "الكهرباء",
+    "Gas Distributors": "توزيع الغاز",
+    "Water Utilities": "المياه",
+    "Telecommunications Equipment": "معدات الاتصالات",
+    "Major Telecommunications": "الاتصالات الكبرى",
+    "Wireless Telecommunications": "الاتصالات اللاسلكية",
+    "Specialty Telecommunications": "الاتصالات المتخصصة",
+    "Food: Major Diversified": "الأغذية المتنوعة",
+    "Food: Specialty/Candy": "الأغذية المتخصصة والحلويات",
+    "Food: Meat/Fish/Dairy": "اللحوم والأسماك والألبان",
+    "Beverages: Non-Alcoholic": "المشروبات غير الكحولية",
+    "Beverages: Alcoholic": "المشروبات الكحولية",
+    "Agricultural Commodities/Milling": "السلع الزراعية والطحن",
+    "Tobacco": "التبغ",
+    "Household/Personal Care": "العناية الشخصية والمنزلية",
+    "Textiles": "المنسوجات",
+    "Apparel/Footwear": "الملابس والأحذية",
+    "Packaged Software": "البرمجيات",
+    "Information Technology Services": "خدمات تقنية المعلومات",
+    "Internet Software/Services": "برمجيات وخدمات الإنترنت",
+    "Data Processing Services": "خدمات معالجة البيانات",
+    "Electronic Components": "المكونات الإلكترونية",
+    "Semiconductors": "أشباه الموصلات",
+    "Computer Peripherals": "ملحقات الحاسب",
+    "Electronics/Appliances": "الإلكترونيات والأجهزة",
+    "Aerospace & Defense": "الطيران والدفاع",
+    "Hospital/Nursing Management": "إدارة المستشفيات",
+    "Medical/Nursing Services": "الخدمات الطبية والتمريضية",
+    "Services to the Health Industry": "خدمات القطاع الصحي",
+    "Pharmaceuticals: Major": "الأدوية الكبرى",
+    "Pharmaceuticals: Generic": "الأدوية الجنيسة",
+    "Pharmaceuticals: Other": "الأدوية الأخرى",
+    "Medical Specialties": "التخصصات الطبية",
+    "Medical Distributors": "توزيع المستلزمات الطبية",
+    "Biotechnology": "التقنية الحيوية",
+    "Drugstore Chains": "سلاسل الصيدليات",
+    "Food Retail": "تجزئة الأغذية",
+    "Specialty Stores": "المتاجر المتخصصة",
+    "Department Stores": "المتاجر الكبرى",
+    "Apparel/Footwear Retail": "تجزئة الملابس والأحذية",
+    "Home Improvement Chains": "سلاسل تحسين المنازل",
+    "Electronics/Appliance Stores": "متاجر الإلكترونيات والأجهزة",
+    "Discount Stores": "متاجر التخفيضات",
+    "Internet Retail": "التجزئة عبر الإنترنت",
+    "Restaurants": "المطاعم",
+    "Hotels/Resorts/Cruiselines": "الفنادق والمنتجعات",
+    "Casinos/Gaming": "الألعاب والترفيه",
+    "Movies/Entertainment": "الأفلام والترفيه",
+    "Recreational Products": "المنتجات الترفيهية",
+    "Home Furnishings": "الأثاث المنزلي",
+    "Other Consumer Services": "خدمات استهلاكية أخرى",
+    "Publishing: Books/Magazines": "النشر",
+    "Broadcasting": "البث",
+    "Cable/Satellite TV": "التلفزيون الفضائي والكابل",
+    "Advertising/Marketing Services": "الإعلان والتسويق",
+    "Personnel Services": "خدمات التوظيف",
+    "Miscellaneous Commercial Services": "خدمات تجارية متنوعة",
+    "Commercial Printing/Forms": "الطباعة التجارية",
+    "Office Equipment/Supplies": "المعدات والمستلزمات المكتبية",
+    "Environmental Services": "الخدمات البيئية",
+    "Air Freight/Couriers": "الشحن الجوي والبريد السريع",
+    "Airlines": "الطيران",
+    "Marine Shipping": "الشحن البحري",
+    "Railroads": "السكك الحديدية",
+    "Trucking": "الشحن البري",
+    "Other Transportation": "نقل آخر",
+    "Wholesale Distributors": "تجارة الجملة",
+    "Food Distributors": "توزيع الأغذية",
+    "Electronics Distributors": "توزيع الإلكترونيات",
+    "Auto Parts: OEM": "قطع غيار السيارات",
+    "Motor Vehicles": "المركبات",
+    "Industrial Machinery": "الآلات الصناعية",
+    "Electrical Products": "المنتجات الكهربائية",
+    "Trucks/Construction/Farm Machinery": "الشاحنات ومعدات البناء والزراعة",
+    "Metal Fabrication": "تشكيل المعادن",
+    "Miscellaneous Manufacturing": "تصنيع متنوع",
+    "Industrial Conglomerates": "المجموعات الصناعية",
+    "Miscellaneous": "متنوعة",
+}
+
+
+def _tr(value, mapping):
+    if not value:
+        return ""
+    return mapping.get(value, value)
+
+
 def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
     try:
         _, df = (
             Query()
             .set_markets("ksa")
             .select("name", "description", "close", "change", "volume",
-                    "average_volume_30d_calc", "sector", "industry")
+                    "average_volume_30d_calc", "sector", "industry",
+                    "price_52_week_high", "High.All",
+                    "price_52_week_low", "Low.All")
             .order_by("volume", ascending=False)
             .limit(limit)
             .get_scanner_data()
@@ -109,8 +262,12 @@ def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
             "change_percent": _clean(r.get("change")) or 0,
             "volume": _clean(r.get("volume")) or 0,
             "avg_volume": _clean(r.get("average_volume_30d_calc")),
-            "sector": _clean(r.get("sector")) or "",
-            "industry": _clean(r.get("industry")) or "",
+            "sector": _tr(_clean(r.get("sector")), SECTOR_AR),
+            "industry": _tr(_clean(r.get("industry")), INDUSTRY_AR),
+            "high_52w": _clean(r.get("price_52_week_high")),
+            "high_all": _clean(r.get("High.All")),
+            "low_52w": _clean(r.get("price_52_week_low")),
+            "low_all": _clean(r.get("Low.All")),
         }
         leaders.append({"symbol": symbol})
     return leaders
@@ -224,6 +381,15 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
         msg += f"السعر الحالي: `{row.Price:.2f}`\n"
         msg += f"نسبة التغيير: `{row.Change_Pct:+.2f}%`\n"
         msg += f"الحجم: `{row.Volume:,}`\n"
+        extra = _CACHE.get(row.Symbol, {})
+
+        def _f(v):
+            return f"{v:.2f}" if isinstance(v, (int, float)) else "-"
+
+        msg += f"قمة 52 اسبوع: `{_f(extra.get('high_52w'))}`\n"
+        msg += f"القمة التاريخية: `{_f(extra.get('high_all'))}`\n"
+        msg += f"قاع 52 اسبوع: `{_f(extra.get('low_52w'))}`\n"
+        msg += f"القاع التاريخي: `{_f(extra.get('low_all'))}`\n"
         msg += f"[شارت TradingView]({tv_link})\n"
         msg += "────────────────────\n\n"
 
