@@ -21,7 +21,7 @@ HEADERS = {"X-API-Key": API_KEY}
 
 # ====================== معايير الفحص ======================
 MIN_CHANGE_PERCENT = 0.5    # الحد الأدنى لنسبة الارتفاع (0.5%)
-MIN_RVOL = 0.1              # تخفيض الحجم النسبي لتمرير أغلب الأسهم النشطة
+MIN_RVOL = 0.1              # الحجم النسبي لتمرير الأسهم النشطة
 MIN_CURRENT_VOLUME = 10_000 # الحد الأدنى لحجم التداول
 MIN_PRICE = 1.0             # الحد الأدنى للسعر
 
@@ -40,21 +40,50 @@ def is_market_open() -> bool:
     return time(9, 45) <= now <= time(15, 15)
 
 
-def get_market_volume_leaders(limit: int = 350) -> List[Dict]:
-    """جلب أسهم السوق السعودي"""
+def get_market_volume_leaders() -> List[Dict]:
+    """جلب كامل أسهم السوق السعودي عبر نظام الصفحات (Pagination) لتجاوز حد الـ 50 سهم"""
     url = f"{BASE_URL}/market/volume/"
-    params = {"limit": limit, "index": "TASI"}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
+    all_stocks = []
     
-    if isinstance(data, dict):
-        for key in ["stocks", "results", "data", "items", "list", "content"]:
-            if key in data and isinstance(data[key], list):
-                return data[key]
-        logger.warning(f"Unexpected API response structure: {list(data.keys())}")
-        return []
-    return data if isinstance(data, list) else []
+    # جلب الصفحات من 1 إلى 7 (تغطي حتى 350+ شركة في السوق السعودي)
+    for page in range(1, 8):
+        params = {"limit": 50, "page": page, "index": "TASI"}
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            
+            page_stocks = []
+            if isinstance(data, dict):
+                for key in ["stocks", "results", "data", "items", "list", "content"]:
+                    if key in data and isinstance(data[key], list):
+                        page_stocks = data[key]
+                        break
+            elif isinstance(data, list):
+                page_stocks = data
+                
+            if not page_stocks:
+                break
+                
+            all_stocks.extend(page_stocks)
+            
+            # إذا كانت الصفحة تحتوي على أقل من 50 سهم، فهذا يعني أننا وصلنا لنهاية السوق
+            if len(page_stocks) < 50:
+                break
+                
+        except Exception as e:
+            logger.warning(f"Error fetching page {page}: {e}")
+            break
+
+    # إزالة أي تكرار محتمل بناءً على رمز السهم
+    unique_stocks = {}
+    for item in all_stocks:
+        sym = item.get("symbol") or item.get("code")
+        if sym and sym not in unique_stocks:
+            unique_stocks[sym] = item
+            
+    return list(unique_stocks.values())
 
 
 def get_quote(symbol: str) -> Optional[Dict]:
@@ -94,7 +123,7 @@ def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
 
 def run_screener() -> pd.DataFrame:
     results = []
-    leaders = get_market_volume_leaders(limit=350)
+    leaders = get_market_volume_leaders()
     
     if not leaders:
         logger.warning("No leaders returned from API or empty list.")
@@ -103,7 +132,7 @@ def run_screener() -> pd.DataFrame:
     symbols = [item.get("symbol") or item.get("code") for item in leaders if isinstance(item, dict)]
     symbols = [s for s in symbols if s]
 
-    logger.info(f"Scanning {len(symbols)} symbols across Saudi market...")
+    logger.info(f"Scanning {len(symbols)} symbols across the entire Saudi market...")
 
     for symbol in symbols:
         try:
@@ -149,7 +178,7 @@ def run_screener() -> pd.DataFrame:
                 "RVOL": rvol or 1.0,
             })
 
-            time_module.sleep(0.10)
+            time_module.sleep(0.08) # وقت استراحة قصير جداً لاستيعاب فحص كامل السوق بسرعة
 
         except Exception as e:
             logger.warning(f"{symbol}: {e}")
@@ -170,14 +199,13 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
     for i, row in enumerate(df.itertuples(), 1):
-        # رابط الشارت المباشر والتفاعلي تماماً مثل البوت الآخر
         tv_link = f"https://www.tradingview.com/chart/?symbol=TADAWUL:{row.Symbol}"
 
         msg += f"🔔 *تنبيه #{i}*\n"
         msg += f"الرمز: `{row.Symbol}`\n"
         msg += f"الاسم: {row.Name}\n"
-        msg += f"القطاع: {row.Sector or '-'}\n"
-        msg += f"الصناعة: {row.Industry or '-'}\n"
+        msg += f"القطاع: `{row.Sector or '-'}`\n"
+        msg += f"الصناعة: `{row.Industry or '-'}`\n"
         msg += f"السعر الحالي: `{row.Price:.2f}`\n"
         msg += f"نسبة التغيير: `{row.Change_Pct:+.2f}%`\n"
         msg += f"الحجم: `{row.Volume:,}`\n"
