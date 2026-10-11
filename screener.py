@@ -20,10 +20,10 @@ BASE_URL = "https://api.sahmk.sa/api/v1"
 HEADERS = {"X-API-Key": API_KEY}
 
 # ====================== معايير الفحص ======================
-MIN_CHANGE_PERCENT = 0.5    # الحد الأدنى لنسبة الارتفاع (0.5%)
-MIN_RVOL = 0.1              # الحجم النسبي لتمرير الأسهم النشطة
-MIN_CURRENT_VOLUME = 10_000 # الحد الأدنى لحجم التداول
-MIN_PRICE = 1.0             # الحد الأدنى للسعر
+MIN_CHANGE_PERCENT = 0.5    
+MIN_RVOL = 0.1              
+MIN_CURRENT_VOLUME = 10_000 
+MIN_PRICE = 1.0             
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,16 +40,38 @@ def is_market_open() -> bool:
     return time(9, 45) <= now <= time(15, 15)
 
 
+def safe_get(url: str, params: Optional[Dict] = None, timeout: int = 15) -> Optional[requests.Response]:
+    """دالة ذكية للتعامل مع الـ API وتجنب أخطاء الضغط الزائد (429)"""
+    retries = 3
+    backoff = 2
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
+            if r.status_code == 429:
+                logger.warning(f"Rate limited (429). Waiting {backoff}s before retry...")
+                time_module.sleep(backoff)
+                backoff *= 2
+                continue
+            return r
+        except Exception as e:
+            if attempt == retries - 1:
+                logger.warning(f"Request failed for {url}: {e}")
+                return None
+            time_module.sleep(1)
+    return None
+
+
 def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
-    """جلب الأسهم الأكثر نشاطاً وحكّة من الـ API مباشرة"""
     url = f"{BASE_URL}/market/volume/"
     params = {"limit": limit, "index": "TASI"}
     
-    try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
-        r.raise_for_status()
-        data = r.json()
+    r = safe_get(url, params=params)
+    if not r or r.status_code != 200:
+        logger.warning("Could not fetch market volume leaders.")
+        return []
         
+    try:
+        data = r.json()
         if isinstance(data, dict):
             for key in ["stocks", "results", "data", "items", "list", "content"]:
                 if key in data and isinstance(data[key], list):
@@ -57,45 +79,51 @@ def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
             logger.warning(f"Unexpected API response structure: {list(data.keys())}")
             return []
         return data if isinstance(data, list) else []
-        
     except Exception as e:
-        logger.warning(f"Error fetching market volume leaders: {e}")
+        logger.warning(f"Error parsing market volume leaders: {e}")
         return []
 
 
 def get_quote(symbol: str) -> Optional[Dict]:
     url = f"{BASE_URL}/quote/{symbol}/"
-    r = requests.get(url, headers=HEADERS, timeout=10)
-    return r.json() if r.status_code == 200 else None
+    r = safe_get(url, timeout=10)
+    if r and r.status_code == 200:
+        return r.json()
+    return None
 
 
 def get_company(symbol: str) -> Optional[Dict]:
     url = f"{BASE_URL}/company/{symbol}/"
-    r = requests.get(url, headers=HEADERS, timeout=10)
-    return r.json() if r.status_code == 200 else None
+    r = safe_get(url, timeout=10)
+    if r and r.status_code == 200:
+        return r.json()
+    return None
 
 
 def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
     url = f"{BASE_URL}/historical/{symbol}/"
     params = {"interval": "1d", "limit": days + 5}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=15)
-    if r.status_code != 200:
+    r = safe_get(url, params=params, timeout=15)
+    if not r or r.status_code != 200:
         return None
-    data = r.json()
     
-    bars = []
-    if isinstance(data, dict):
-        for key in ["data", "results", "items", "candles", "history"]:
-            if key in data and isinstance(data[key], list):
-                bars = data[key]
-                break
-    elif isinstance(data, list):
-        bars = data
+    try:
+        data = r.json()
+        bars = []
+        if isinstance(data, dict):
+            for key in ["data", "results", "items", "candles", "history"]:
+                if key in data and isinstance(data[key], list):
+                    bars = data[key]
+                    break
+        elif isinstance(data, list):
+            bars = data
 
-    if not bars or len(bars) < 5:
+        if not bars or len(bars) < 5:
+            return None
+        volumes = [b.get("volume", 0) for b in bars[-days:] if isinstance(b, dict) and b.get("volume")]
+        return sum(volumes) / len(volumes) if volumes else None
+    except Exception:
         return None
-    volumes = [b.get("volume", 0) for b in bars[-days:] if isinstance(b, dict) and b.get("volume")]
-    return sum(volumes) / len(volumes) if volumes else None
 
 
 def run_screener() -> pd.DataFrame:
@@ -109,7 +137,7 @@ def run_screener() -> pd.DataFrame:
     symbols = [item.get("symbol") or item.get("code") for item in leaders if isinstance(item, dict)]
     symbols = [s for s in symbols if s]
 
-    logger.info(f"Scanning {len(symbols)} active symbols...")
+    logger.info(f"Scanning {len(symbols)} active symbols safely...")
 
     for symbol in symbols:
         try:
@@ -155,7 +183,8 @@ def run_screener() -> pd.DataFrame:
                 "RVOL": rvol or 1.0,
             })
 
-            time_module.sleep(0.10)
+            # فاصل زمني أمان لتفادي حظر الطلبات (429)
+            time_module.sleep(0.25)
 
         except Exception as e:
             logger.warning(f"{symbol}: {e}")
