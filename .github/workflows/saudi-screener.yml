@@ -1,0 +1,50 @@
+name: Saudi Stock Screener
+
+on:
+  schedule:
+    # ====================== فحص أولي الساعة 5:50 صباحاً (توقيت الرياض) ======================
+    # 5:50 الرياض = 02:50 UTC
+    - cron: '50 2 * * 0-4'   # الأحد إلى الخميس
+
+    # ====================== كل 5 دقائق من 9:45 إلى 15:15 ======================
+    # 9:45 الرياض = 06:45 UTC
+    # 15:15 الرياض = 12:15 UTC
+
+    # من 9:45 إلى 10:00
+    - cron: '45,50,55 6 * * 0-4'
+
+    # من 10:00 إلى 14:55 (كل 5 دقائق)
+    - cron: '*/5 7-11 * * 0-4'
+
+    # من 15:00 إلى 15:15
+    - cron: '0,5,10,15 12 * * 0-4'
+
+  # تشغيل يدوي من GitHub
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests pandas pytz python-telegram-bot==21.6
+
+      - name: Run Screener
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          python screener.py
