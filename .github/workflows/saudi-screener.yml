@@ -1,23 +1,14 @@
-name: Saudi Stock Screener
+name: Saudi Screener
 
 on:
-  schedule:
-    # ====================== فحص أولي الساعة 5:50 صباحاً (توقيت الرياض) ======================
-    - cron: '50 2 * * 0-4'   # الأحد إلى الخميس
-
-    # ====================== كل 5 دقائق من 9:45 إلى 15:15 ======================
-    - cron: '45,50,55 6 * * 0-4'
-    - cron: '*/5 7-11 * * 0-4'
-    - cron: '0,5,10,15 12 * * 0-4'
-
-  # تشغيل يدوي من GitHub
   workflow_dispatch:
+  # أبقِ جدولة التشغيل (schedule) الموجودة عندك هنا، مثال:
+  # schedule:
+  #   - cron: "*/15 7-12 * * 0-4"
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,17 +16,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install requests pandas pytz
+          python -m pip install --upgrade pip
+          pip install requests pandas pytz tradingview-screener
 
       - name: Run Screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           API_KEY: ${{ secrets.API_KEY }}
-        run: |
-          python screener.py
+        run: python screener.py
