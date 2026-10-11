@@ -47,9 +47,9 @@ def get_market_volume_leaders(limit: int = 80) -> List[Dict]:
     r.raise_for_status()
     data = r.json()
     
-    # استخراج البيانات بشكل مرن بغض النظر عن اسم مفتاح القائمة في الـ API
+    # إضافة "stocks" كأول مفتاح للبحث عنه بناءً على استجابة الـ API
     if isinstance(data, dict):
-        for key in ["results", "data", "items", "list", "content"]:
+        for key in ["stocks", "results", "data", "items", "list", "content"]:
             if key in data and isinstance(data[key], list):
                 return data[key]
         logger.warning(f"Unexpected API response structure: {list(data.keys())}")
@@ -101,7 +101,7 @@ def run_screener() -> pd.DataFrame:
         return pd.DataFrame()
 
     symbols = [item.get("symbol") or item.get("code") for item in leaders if isinstance(item, dict)]
-    symbols = [s for s in symbols if s]  # تصفية القيم الفارغة
+    symbols = [s for s in symbols if s]
 
     logger.info(f"Scanning {len(symbols)} symbols...")
 
@@ -143,7 +143,7 @@ def run_screener() -> pd.DataFrame:
                 "Sector": sector,
                 "Industry": industry,
                 "Price": price,
-                "Change_Pct": change_pct, # تم تعديل الاسم لتجنب مشاكل الرموز الخاصة
+                "Change_Pct": change_pct,
                 "Volume": volume,
                 "RVOL": rvol,
             })
@@ -211,8 +211,6 @@ def main():
         logger.info(f"Found {len(df)} stocks")
     else:
         logger.info("No stocks matched the criteria")
-        # إذا أردت وصول إشعار حتى لو لم تطابق أي سهم الشروط، قم بإلغاء التفعيل أدناه:
-        # send_telegram(f"⏳ لا توجد أسهم تطابق المعايير حالياً\n⏰ {get_riyadh_time()}")
 
 
 if __name__ == "__main__":
