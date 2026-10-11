@@ -17,7 +17,14 @@ CHAT_ID = os.getenv("CHAT_ID")
 API_KEY = os.getenv("API_KEY")
 
 BASE_URL = "https://api.sahmk.sa/api/v1"
-HEADERS = {"X-API-Key": API_KEY}
+
+# إضافة ترويسة متصفح وهمية (User-Agent) لتجاوز حظر الـ Bots ورسائل 429
+HEADERS = {
+    "X-API-Key": API_KEY,
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.55 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8"
+}
 
 # ====================== معايير الفحص ======================
 MIN_CHANGE_PERCENT = 0.5    
@@ -41,23 +48,28 @@ def is_market_open() -> bool:
 
 
 def safe_get(url: str, params: Optional[Dict] = None, timeout: int = 15) -> Optional[requests.Response]:
-    """دالة ذكية للتعامل مع الـ API وتجنب أخطاء الضغط الزائد (429)"""
-    retries = 3
-    backoff = 2
+    """دالة ذكية للتعامل مع الـ API وتجنب أخطاء الضغط الزائد (429) مع إعادة المحاولة"""
+    retries = 4
+    backoff = 3
+    
+    # استخدام Session لضمان استقرار الاتصال
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
+            r = session.get(url, params=params, timeout=timeout)
             if r.status_code == 429:
-                logger.warning(f"Rate limited (429). Waiting {backoff}s before retry...")
+                logger.warning(f"Rate limited (429) on {url}. Waiting {backoff}s before retry...")
                 time_module.sleep(backoff)
-                backoff *= 2
+                backoff *= 2  # مضاعفة وقت الانتظار تصاعدياً
                 continue
             return r
         except Exception as e:
             if attempt == retries - 1:
                 logger.warning(f"Request failed for {url}: {e}")
                 return None
-            time_module.sleep(1)
+            time_module.sleep(2)
     return None
 
 
@@ -67,7 +79,7 @@ def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
     
     r = safe_get(url, params=params)
     if not r or r.status_code != 200:
-        logger.warning("Could not fetch market volume leaders.")
+        logger.warning(f"Could not fetch market volume leaders. Status: {r.status_code if r else 'No response'}")
         return []
         
     try:
@@ -183,8 +195,8 @@ def run_screener() -> pd.DataFrame:
                 "RVOL": rvol or 1.0,
             })
 
-            # فاصل زمني أمان لتفادي حظر الطلبات (429)
-            time_module.sleep(0.25)
+            # زيادة الفاصل الزمني قليلاً (0.4 ثانية) لحماية الطلبات من الحظر
+            time_module.sleep(0.4)
 
         except Exception as e:
             logger.warning(f"{symbol}: {e}")
