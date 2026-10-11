@@ -18,12 +18,17 @@ API_KEY = os.getenv("API_KEY")
 
 BASE_URL = "https://api.sahmk.sa/api/v1"
 
-# إضافة ترويسة متصفح وهمية (User-Agent) لتجاوز حظر الـ Bots ورسائل 429
+# ترويسات متصفح كاملة لتجاوز حظر جدار الحماية (WAF / Cloudflare)
 HEADERS = {
     "X-API-Key": API_KEY,
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.55 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.sahmk.sa/",
+    "Origin": "https://www.sahmk.sa",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8"
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site"
 }
 
 # ====================== معايير الفحص ======================
@@ -48,11 +53,9 @@ def is_market_open() -> bool:
 
 
 def safe_get(url: str, params: Optional[Dict] = None, timeout: int = 15) -> Optional[requests.Response]:
-    """دالة ذكية للتعامل مع الـ API وتجنب أخطاء الضغط الزائد (429) مع إعادة المحاولة"""
     retries = 4
     backoff = 3
     
-    # استخدام Session لضمان استقرار الاتصال
     session = requests.Session()
     session.headers.update(HEADERS)
     
@@ -62,7 +65,7 @@ def safe_get(url: str, params: Optional[Dict] = None, timeout: int = 15) -> Opti
             if r.status_code == 429:
                 logger.warning(f"Rate limited (429) on {url}. Waiting {backoff}s before retry...")
                 time_module.sleep(backoff)
-                backoff *= 2  # مضاعفة وقت الانتظار تصاعدياً
+                backoff *= 2
                 continue
             return r
         except Exception as e:
@@ -195,7 +198,6 @@ def run_screener() -> pd.DataFrame:
                 "RVOL": rvol or 1.0,
             })
 
-            # زيادة الفاصل الزمني قليلاً (0.4 ثانية) لحماية الطلبات من الحظر
             time_module.sleep(0.4)
 
         except Exception as e:
