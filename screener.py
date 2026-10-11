@@ -19,10 +19,10 @@ API_KEY = os.getenv("API_KEY")
 BASE_URL = "https://api.sahmk.sa/api/v1"
 HEADERS = {"X-API-Key": API_KEY}
 
-# معايير الفحص
-MIN_CHANGE_PERCENT = 0.75
-MIN_RVOL = 0.9
-MIN_CURRENT_VOLUME = 100_000
+# ====================== معايير الفحص ======================
+MIN_CHANGE_PERCENT = 0.5   # يمكنك تعديل النسبة حسب رغبتك
+MIN_RVOL = 0.8
+MIN_CURRENT_VOLUME = 50_000
 MIN_PRICE = 1.0
 
 logging.basicConfig(level=logging.INFO)
@@ -40,14 +40,14 @@ def is_market_open() -> bool:
     return time(9, 45) <= now <= time(15, 15)
 
 
-def get_market_volume_leaders(limit: int = 80) -> List[Dict]:
+def get_market_volume_leaders(limit: int = 350) -> List[Dict]:
+    """جلب قائمة الأسهم من السوق السعودي (تضم أكثر من 350 شركة)"""
     url = f"{BASE_URL}/market/volume/"
     params = {"limit": limit, "index": "TASI"}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+    r = requests.get(url, headers=HEADERS, params=params, timeout=20)
     r.raise_for_status()
     data = r.json()
     
-    # إضافة "stocks" كأول مفتاح للبحث عنه بناءً على استجابة الـ API
     if isinstance(data, dict):
         for key in ["stocks", "results", "data", "items", "list", "content"]:
             if key in data and isinstance(data[key], list):
@@ -94,7 +94,8 @@ def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
 
 def run_screener() -> pd.DataFrame:
     results = []
-    leaders = get_market_volume_leaders(limit=80)
+    # جلب حتى 350 شركة لتغطية كامل السوق السعودي
+    leaders = get_market_volume_leaders(limit=350)
     
     if not leaders:
         logger.warning("No leaders returned from API or empty list.")
@@ -103,7 +104,7 @@ def run_screener() -> pd.DataFrame:
     symbols = [item.get("symbol") or item.get("code") for item in leaders if isinstance(item, dict)]
     symbols = [s for s in symbols if s]
 
-    logger.info(f"Scanning {len(symbols)} symbols...")
+    logger.info(f"Scanning {len(symbols)} symbols across Saudi market...")
 
     for symbol in symbols:
         try:
@@ -121,7 +122,8 @@ def run_screener() -> pd.DataFrame:
 
             avg_vol = get_avg_volume(symbol)
             rvol = (volume / avg_vol) if avg_vol and avg_vol > 0 else None
-            if rvol is None or rvol < MIN_RVOL:
+            
+            if rvol is not None and rvol < MIN_RVOL:
                 continue
 
             company = get_company(symbol)
@@ -145,10 +147,10 @@ def run_screener() -> pd.DataFrame:
                 "Price": price,
                 "Change_Pct": change_pct,
                 "Volume": volume,
-                "RVOL": rvol,
+                "RVOL": rvol or 1.0,
             })
 
-            time_module.sleep(0.30)
+            time_module.sleep(0.15) # تقليل الفاصل الزمني لاستيعاب الفحص الشامل
 
         except Exception as e:
             logger.warning(f"{symbol}: {e}")
@@ -164,7 +166,7 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
     if df.empty:
         return None
 
-    msg = f"🇸🇦 *تنبيهات السوق*\n"
+    msg = f"🇸🇦 *تنبيهات السوق السعودي*\n"
     msg += f"⏰ {get_riyadh_time()}\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -177,8 +179,8 @@ def format_message(df: pd.DataFrame) -> Optional[str]:
         msg += f"القطاع: {row.Sector or '-'}\n"
         msg += f"الصناعة: {row.Industry or '-'}\n"
         msg += f"السعر الحالي: `{row.Price:.2f}`\n"
-        msg += f"نسبة التغيير من الافتتاح: `{row.Change_Pct:+.2f}%`\n"
-        msg += f"Vol: `{row.Volume:,}`\n"
+        msg += f"نسبة التغيير: `{row.Change_Pct:+.2f}%`\n"
+        msg += f"الحجم: `{row.Volume:,}`\n"
         msg += f"[TradingView]({tv_link})\n"
         msg += "────────────────────\n\n"
 
@@ -195,7 +197,7 @@ def send_telegram(text: str):
     }
     r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
-    logger.info("Message sent to Telegram")
+    logger.info("Message sent to Telegram successfully")
 
 
 def main():
@@ -208,9 +210,9 @@ def main():
 
     if msg:
         send_telegram(msg)
-        logger.info(f"Found {len(df)} stocks")
+        logger.info(f"Found {len(df)} stocks and sent to Telegram")
     else:
-        logger.info("No stocks matched the criteria")
+        logger.info("No stocks matched criteria.")
 
 
 if __name__ == "__main__":
