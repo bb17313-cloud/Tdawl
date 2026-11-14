@@ -132,16 +132,8 @@ def clean_saudi_price(price_str):
 
 
 def is_saudi_market_open():
-    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-        return True
-    ksa_tz = timezone(timedelta(hours=3))
-    now_ksa = datetime.now(ksa_tz)
-    if now_ksa.weekday() in:
-        return False
-    current_minutes = now_ksa.hour * 60 + now_ksa.minute
-    if current_minutes < (10 * 60) or current_minutes > (15 * 60 + 25):
-        return False
     return True
+
 
 
 def fetch_saudi_stock(ticker):
