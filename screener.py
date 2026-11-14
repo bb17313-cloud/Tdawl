@@ -77,18 +77,18 @@ class GoogleSaudiStockParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.in_price_div = False
-        self.in_title_div = False
+        self.in_pct_div = False
         self.prices = []
-        self.company_name = ""
+        self.pcts = []
         self.full_text = []
 
     def handle_starttag(self, tag, attrs):
-        if tag == "div":
+        if tag in ("div", "span"):
             for k, v in attrs:
-                if k == "class" and v == "YMlKec fxKbKc":
+                if k == "class" and "YMlKec" in v and "fxKbKc" in v:
                     self.in_price_div = True
-                elif k == "class" and v == "zzDege":
-                    self.in_title_div = True
+                elif k == "class" and "JwB6zf" in v:
+                    self.in_pct_div = True
 
     def handle_data(self, data):
         clean_data = html.unescape(data).strip()
@@ -98,27 +98,14 @@ class GoogleSaudiStockParser(HTMLParser):
         if self.in_price_div:
             self.prices.append(clean_data)
             self.in_price_div = False
-        if self.in_title_div:
-            self.company_name += clean_data
-            self.in_title_div = False
+        if self.in_pct_div:
+            self.pcts.append(clean_data)
+            self.in_pct_div = False
 
     def handle_endtag(self, tag):
-        if tag == "div":
+        if tag in ("div", "span"):
             self.in_price_div = False
-            self.in_title_div = False
-
-
-def is_excluded_saudi_entity(ticker, company_name):
-    if str(ticker) in ("1120", "1150"):
-        return False
-    try:
-        code = int(ticker)
-        if (1010 <= code <= 1183) or (4330 <= code <= 4349) or (code >= 9400):
-            return True
-    except ValueError:
-        pass
-    excluded_words = ("bank", "reit", "etf", "fund", "مصرف", "بنك", "ريت")
-    return any(w in company_name.lower() for w in excluded_words)
+            self.in_pct_div = False
 
 
 def clean_saudi_price(price_str):
@@ -131,26 +118,22 @@ def clean_saudi_price(price_str):
         return None
 
 
-def is_saudi_market_open():
-    return True
-
-
 def fetch_saudi_stock(ticker):
     url = f"https://google.com{ticker}:TADAWUL?hl=en"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9"
     }
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             html_content = response.read().decode("utf-8")
 
         parser = GoogleSaudiStockParser()
         parser.feed(html_content)
 
         first_price = next(iter(parser.prices), None)
-        if not first_price or is_excluded_saudi_entity(ticker, parser.company_name):
+        if not first_price:
             return None
 
         price = clean_saudi_price(first_price)
@@ -158,14 +141,18 @@ def fetch_saudi_stock(ticker):
             return None
 
         pct_change = 0.0
-        for word in parser.full_text:
-            if word.endswith("%") and "(" not in word and any(c.isdigit() for c in word):
+        # البحث أولاً في كلاسات النسبة المئوية المخصصة
+        candidates = parser.pcts + parser.full_text
+        for word in candidates:
+            if "%" in word and any(c.isdigit() for c in word):
+                clean_w = word.replace("(", "").replace(")", "").replace("%", "").replace("+", "").strip()
                 try:
-                    if "-" not in word:
-                        val = float(word.replace("%", "").replace("+", "").strip())
-                        if val > 0:
-                            pct_change = val
-                            break
+                    val = float(clean_w)
+                    if val > 0:
+                        pct_change = val
+                        break
+                    elif val < 0:
+                        return None
                 except ValueError:
                     continue
 
@@ -175,31 +162,6 @@ def fetch_saudi_stock(ticker):
         return {"ticker": ticker, "name": SAUDI_NAMES.get(ticker, ""), "price": price, "pct": pct_change}
     except Exception:
         return None
-
-
-def has_market_changed(valid_stocks):
-    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-        return True
-
-    new_snapshot = {item["ticker"]: {"price": item["price"], "pct": item["pct"]} for item in valid_stocks}
-    old_snapshot = {}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                old_snapshot = json.load(f)
-        except Exception:
-            old_snapshot = {}
-
-    if new_snapshot == old_snapshot:
-        return False
-
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(new_snapshot, f, ensure_ascii=False)
-    except Exception:
-        pass
-
-    return True
 
 
 def build_saudi_telegram_messages(stocks_list):
@@ -234,3 +196,31 @@ def build_saudi_telegram_messages(stocks_list):
         if current_length + len(line) + 50 > 3800:
             current_chunk.extend(footer)
             messages.append("\n".join(current_chunk))
+            current_chunk = ["🚨 <b>Tadawul Market Movers (تابع)</b>", f"⏰ <code>{current_time}</code>", "", line]
+            current_length = sum(len(l) + 1 for l in current_chunk)
+        else:
+            current_chunk.append(line)
+            current_length += len(line) + 1
+
+    if len(current_chunk) > len(header):
+        current_chunk.extend(footer)
+        messages.append("\n".join(current_chunk))
+
+    return messages
+
+
+def send_to_telegram(message_text):
+    bot_token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("CHAT_ID")
+    if not bot_token or not chat_id:
+        print("Missing secrets!")
+        return
+    url = f"https://telegram.org{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message_text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            res = json.loads(response.read().decode("utf-8"))
+            print("Telegram Sent:", res.get("ok"))
+    except Exception as e:
