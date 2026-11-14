@@ -8,6 +8,8 @@ from html.parser import HTMLParser
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+STATE_FILE = "saudi_state.json"
+
 SAUDI_NAMES = {
     "1120": "الراجحي", "1150": "الإنماء",
     "2222": "أرامكو", "2380": "بترو رابغ", "2381": "لوبريف", "2382": "أديس",
@@ -107,41 +109,64 @@ class GoogleSaudiStockParser(HTMLParser):
 
 
 def fetch_saudi_stock(ticker):
-    url = f"https://google.com{ticker}:TDWL?hl=en"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": "CONSENT=YES+cb.20210720-07-p0.en+FX+410; SOCS=CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg"
-    }
+    for exch in ("TADAWUL", "TDWL"):
+        url = f"https://google.com{ticker}:{exch}?hl=en"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": "CONSENT=YES+cb.20210720-07-p0.en+FX+410; SOCS=CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg"
+        }
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html_content = response.read().decode("utf-8")
+            parser = GoogleSaudiStockParser()
+            parser.feed(html_content)
+            first_price = next(iter(parser.prices), None)
+            if not first_price:
+                continue
+            cleaned = str(first_price).replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
+            price = float(cleaned)
+            pct_change = 0.0
+            for word in (parser.pcts + parser.full_text):
+                if "%" in word and any(c.isdigit() for c in word):
+                    clean_w = word.replace("(", "").replace(")", "").replace("%", "").replace("+", "").strip()
+                    try:
+                        val = float(clean_w)
+                        if val > 0:
+                            pct_change = val
+                            break
+                        elif val < 0:
+                            return None
+                    except ValueError:
+                        continue
+            if pct_change <= 0:
+                return None
+            return {"ticker": ticker, "name": SAUDI_NAMES.get(ticker, ""), "price": price, "pct": pct_change}
+        except Exception:
+            continue
+    return None
+
+
+def has_market_changed(valid_stocks):
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        return True
+    new_snapshot = {item["ticker"]: {"price": item["price"], "pct": item["pct"]} for item in valid_stocks}
+    old_snapshot = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                old_snapshot = json.load(f)
+        except Exception:
+            old_snapshot = {}
+    if new_snapshot == old_snapshot:
+        return False
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html_content = response.read().decode("utf-8")
-        parser = GoogleSaudiStockParser()
-        parser.feed(html_content)
-        first_price = next(iter(parser.prices), None)
-        if not first_price:
-            return None
-        cleaned = str(first_price).replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
-        price = float(cleaned)
-        pct_change = 0.0
-        for word in (parser.pcts + parser.full_text):
-            if "%" in word and any(c.isdigit() for c in word):
-                clean_w = word.replace("(", "").replace(")", "").replace("%", "").replace("+", "").strip()
-                try:
-                    val = float(clean_w)
-                    if val > 0:
-                        pct_change = val
-                        break
-                    elif val < 0:
-                        return None
-                except ValueError:
-                    continue
-        if pct_change <= 0:
-            return None
-        return {"ticker": ticker, "name": SAUDI_NAMES.get(ticker, ""), "price": price, "pct": pct_change}
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(new_snapshot, f, ensure_ascii=False)
     except Exception:
-        return None
+        pass
+    return True
 
 
 def send_to_telegram(message_text):
@@ -160,7 +185,7 @@ def send_to_telegram(message_text):
 
 
 def main():
-    print("Scanning Saudi Market (TDWL)...")
+    print("Scanning Saudi Market...")
     valid_stocks = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fetch_saudi_stock, t): t for t in SAUDI_NAMES.keys()}
@@ -171,28 +196,12 @@ def main():
     print("Rising stocks count:", len(valid_stocks))
     if not valid_stocks:
         return
+    if not has_market_changed(valid_stocks):
+        print("No price updates since last run.")
+        return
     ksa_tz = timezone(timedelta(hours=3))
     current_time = datetime.now(ksa_tz).strftime("%H:%M")
     header = ["🚨 <b>Tadawul Market Movers</b>", f"⏰ <code>{current_time}</code>", ""]
     footer = ["", "📊 المصدر: Google Finance"]
     sorted_stocks = sorted(valid_stocks, key=lambda x: x["pct"], reverse=True)
     current_chunk = list(header)
-    current_length = sum(len(l) + 1 for l in current_chunk)
-    for idx, item in enumerate(sorted_stocks, start=1):
-        t = item["ticker"]
-        label = f"{t} {item['name']}".strip()
-        p_str = f"{item['price']:.2f} SAR"
-        pct_str = f"{item['pct']:.2f}%"
-        tv_url = f"https://tradingview.com:{t}"
-        line = f'{idx}. <a href="{tv_url}"><b><code>{label}</code></b></a>  ·  <code>{p_str}</code>  ·  <code>{pct_str}</code>'
-        if current_length + len(line) + 50 > 3800:
-            current_chunk.extend(footer)
-            send_to_telegram("\n".join(current_chunk))
-            time.sleep(1.0)
-            current_chunk = ["🚨 <b>Tadawul Market Movers (تابع)</b>", f"⏰ <code>{current_time}</code>", "", line]
-            current_length = sum(len(l) + 1 for l in current_chunk)
-        else:
-            current_chunk.append(line)
-            current_length += len(line) + 1
-    if len(current_chunk) > len(header):
-        current_chunk.extend(footer)
