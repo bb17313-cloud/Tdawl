@@ -1,491 +1,251 @@
-"""
-Saudi Stock Screener - للتشغيل مرة واحدة (GitHub Actions)
-"""
-
 import os
+import time
+import html
 import json
-import requests
-import pandas as pd
-from datetime import datetime, time
-import pytz
-import logging
-import time as time_module
-from typing import List, Dict, Optional
-from tradingview_screener import Query
+import urllib.request
+import urllib.parse
+from html.parser import HTMLParser
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ====================== الإعدادات من Secrets ======================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-API_KEY = os.getenv("API_KEY")
+STATE_FILE = "saudi_state.json"
 
-BASE_URL = "https://api.sahmk.sa/api/v1"
-
-# ترويسات متصفح كاملة لتجاوز حظر جدار الحماية (WAF / Cloudflare)
-HEADERS = {
-    "X-API-Key": API_KEY,
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.sahmk.sa/",
-    "Origin": "https://www.sahmk.sa",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site"
-}
-
-# ====================== معايير الفحص ======================
-MIN_CHANGE_PERCENT = 0.5    
-MIN_RVOL = 0.1              
-MIN_CURRENT_VOLUME = 10_000 
-MIN_PRICE = 1.0             
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def get_riyadh_time() -> str:
-    riyadh = pytz.timezone("Asia/Riyadh")
-    return datetime.now(riyadh).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def is_market_open() -> bool:
-    riyadh = pytz.timezone("Asia/Riyadh")
-    now = datetime.now(riyadh).time()
-    return time(9, 45) <= now <= time(15, 15)
-
-
-def safe_get(url: str, params: Optional[Dict] = None, timeout: int = 15) -> Optional[requests.Response]:
-    retries = 4
-    backoff = 3
-    
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    
-    for attempt in range(retries):
-        try:
-            r = session.get(url, params=params, timeout=timeout)
-            if r.status_code == 429:
-                logger.warning(f"Rate limited (429) on {url}. Waiting {backoff}s before retry...")
-                time_module.sleep(backoff)
-                backoff *= 2
-                continue
-            return r
-        except Exception as e:
-            if attempt == retries - 1:
-                logger.warning(f"Request failed for {url}: {e}")
-                return None
-            time_module.sleep(2)
-    return None
-
-
-# ====================== مصدر البيانات: TradingView ======================
-_CACHE: Dict[str, Dict] = {}
-
-
-def _clean(v):
-    return None if v is None or (isinstance(v, float) and pd.isna(v)) else v
-
-
-SECTOR_AR = {
-    "Finance": "المالية",
-    "Energy Minerals": "المعادن والطاقة",
-    "Non-Energy Minerals": "المعادن غير الطاقية",
-    "Process Industries": "الصناعات التحويلية",
-    "Utilities": "المرافق العامة",
-    "Communications": "الاتصالات",
-    "Consumer Non-Durables": "السلع الاستهلاكية غير المعمرة",
-    "Consumer Durables": "السلع الاستهلاكية المعمرة",
-    "Consumer Services": "الخدمات الاستهلاكية",
-    "Distribution Services": "خدمات التوزيع",
-    "Electronic Technology": "التقنية الإلكترونية",
-    "Health Services": "الخدمات الصحية",
-    "Health Technology": "التقنية الصحية",
-    "Industrial Services": "الخدمات الصناعية",
-    "Miscellaneous": "متنوعة",
-    "Producer Manufacturing": "التصنيع",
-    "Retail Trade": "تجارة التجزئة",
-    "Technology Services": "الخدمات التقنية",
-    "Transportation": "النقل",
-    "Commercial Services": "الخدمات التجارية",
-}
-
-INDUSTRY_AR = {
-    "Major Banks": "البنوك الكبرى",
-    "Regional Banks": "البنوك الإقليمية",
-    "Savings Banks": "بنوك الادخار",
-    "Financial Conglomerates": "المجموعات المالية",
-    "Investment Banks/Brokers": "بنوك الاستثمار والوساطة",
-    "Investment Managers": "إدارة الاستثمار",
-    "Investment Trusts/Mutual Funds": "صناديق الاستثمار",
-    "Finance/Rental/Leasing": "التمويل والتأجير",
-    "Financial Publishing/Services": "الخدمات المالية",
-    "Life/Health Insurance": "التأمين الصحي وعلى الحياة",
-    "Multi-Line Insurance": "التأمين متعدد الخطوط",
-    "Property/Casualty Insurance": "تأمين الممتلكات والحوادث",
-    "Specialty Insurance": "التأمين المتخصص",
-    "Insurance Brokers/Services": "وساطة وخدمات التأمين",
-    "Managed Health Care": "الرعاية الصحية المُدارة",
-    "Real Estate Development": "التطوير العقاري",
-    "Real Estate Investment Trusts": "صناديق الريت العقارية",
-    "Homebuilding": "بناء المساكن",
-    "Oil & Gas Production": "إنتاج النفط والغاز",
-    "Oil Refining/Marketing": "تكرير وتسويق النفط",
-    "Oil & Gas Pipelines": "أنابيب النفط والغاز",
-    "Oilfield Services/Equipment": "خدمات ومعدات حقول النفط",
-    "Contract Drilling": "الحفر التعاقدي",
-    "Integrated Oil": "النفط المتكامل",
-    "Coal": "الفحم",
-    "Alternative Power Generation": "توليد الطاقة البديلة",
-    "Chemicals: Specialty": "الكيماويات المتخصصة",
-    "Chemicals: Major Diversified": "الكيماويات المتنوعة",
-    "Chemicals: Agricultural": "الكيماويات الزراعية",
-    "Industrial Specialties": "المنتجات الصناعية المتخصصة",
-    "Building Products": "منتجات البناء",
-    "Construction Materials": "مواد البناء",
-    "Engineering & Construction": "الهندسة والمقاولات",
-    "Steel": "الحديد والصلب",
-    "Aluminum": "الألمنيوم",
-    "Other Metals/Minerals": "معادن أخرى",
-    "Precious Metals": "المعادن الثمينة",
-    "Forest Products": "منتجات الغابات",
-    "Pulp & Paper": "الورق واللب",
-    "Containers/Packaging": "العبوات والتغليف",
-    "Electric Utilities": "الكهرباء",
-    "Gas Distributors": "توزيع الغاز",
-    "Water Utilities": "المياه",
-    "Telecommunications Equipment": "معدات الاتصالات",
-    "Major Telecommunications": "الاتصالات الكبرى",
-    "Wireless Telecommunications": "الاتصالات اللاسلكية",
-    "Specialty Telecommunications": "الاتصالات المتخصصة",
-    "Food: Major Diversified": "الأغذية المتنوعة",
-    "Food: Specialty/Candy": "الأغذية المتخصصة والحلويات",
-    "Food: Meat/Fish/Dairy": "اللحوم والأسماك والألبان",
-    "Beverages: Non-Alcoholic": "المشروبات غير الكحولية",
-    "Beverages: Alcoholic": "المشروبات الكحولية",
-    "Agricultural Commodities/Milling": "السلع الزراعية والطحن",
-    "Tobacco": "التبغ",
-    "Household/Personal Care": "العناية الشخصية والمنزلية",
-    "Textiles": "المنسوجات",
-    "Apparel/Footwear": "الملابس والأحذية",
-    "Packaged Software": "البرمجيات",
-    "Information Technology Services": "خدمات تقنية المعلومات",
-    "Internet Software/Services": "برمجيات وخدمات الإنترنت",
-    "Data Processing Services": "خدمات معالجة البيانات",
-    "Electronic Components": "المكونات الإلكترونية",
-    "Semiconductors": "أشباه الموصلات",
-    "Computer Peripherals": "ملحقات الحاسب",
-    "Electronics/Appliances": "الإلكترونيات والأجهزة",
-    "Aerospace & Defense": "الطيران والدفاع",
-    "Hospital/Nursing Management": "إدارة المستشفيات",
-    "Medical/Nursing Services": "الخدمات الطبية والتمريضية",
-    "Services to the Health Industry": "خدمات القطاع الصحي",
-    "Pharmaceuticals: Major": "الأدوية الكبرى",
-    "Pharmaceuticals: Generic": "الأدوية الجنيسة",
-    "Pharmaceuticals: Other": "الأدوية الأخرى",
-    "Medical Specialties": "التخصصات الطبية",
-    "Medical Distributors": "توزيع المستلزمات الطبية",
-    "Biotechnology": "التقنية الحيوية",
-    "Drugstore Chains": "سلاسل الصيدليات",
-    "Food Retail": "تجزئة الأغذية",
-    "Specialty Stores": "المتاجر المتخصصة",
-    "Department Stores": "المتاجر الكبرى",
-    "Apparel/Footwear Retail": "تجزئة الملابس والأحذية",
-    "Home Improvement Chains": "سلاسل تحسين المنازل",
-    "Electronics/Appliance Stores": "متاجر الإلكترونيات والأجهزة",
-    "Discount Stores": "متاجر التخفيضات",
-    "Internet Retail": "التجزئة عبر الإنترنت",
-    "Restaurants": "المطاعم",
-    "Hotels/Resorts/Cruiselines": "الفنادق والمنتجعات",
-    "Casinos/Gaming": "الألعاب والترفيه",
-    "Movies/Entertainment": "الأفلام والترفيه",
-    "Recreational Products": "المنتجات الترفيهية",
-    "Home Furnishings": "الأثاث المنزلي",
-    "Other Consumer Services": "خدمات استهلاكية أخرى",
-    "Publishing: Books/Magazines": "النشر",
-    "Broadcasting": "البث",
-    "Cable/Satellite TV": "التلفزيون الفضائي والكابل",
-    "Advertising/Marketing Services": "الإعلان والتسويق",
-    "Personnel Services": "خدمات التوظيف",
-    "Miscellaneous Commercial Services": "خدمات تجارية متنوعة",
-    "Commercial Printing/Forms": "الطباعة التجارية",
-    "Office Equipment/Supplies": "المعدات والمستلزمات المكتبية",
-    "Environmental Services": "الخدمات البيئية",
-    "Air Freight/Couriers": "الشحن الجوي والبريد السريع",
-    "Airlines": "الطيران",
-    "Marine Shipping": "الشحن البحري",
-    "Railroads": "السكك الحديدية",
-    "Trucking": "الشحن البري",
-    "Other Transportation": "نقل آخر",
-    "Wholesale Distributors": "تجارة الجملة",
-    "Food Distributors": "توزيع الأغذية",
-    "Electronics Distributors": "توزيع الإلكترونيات",
-    "Auto Parts: OEM": "قطع غيار السيارات",
-    "Motor Vehicles": "المركبات",
-    "Industrial Machinery": "الآلات الصناعية",
-    "Electrical Products": "المنتجات الكهربائية",
-    "Trucks/Construction/Farm Machinery": "الشاحنات ومعدات البناء والزراعة",
-    "Metal Fabrication": "تشكيل المعادن",
-    "Miscellaneous Manufacturing": "تصنيع متنوع",
-    "Industrial Conglomerates": "المجموعات الصناعية",
-    "Miscellaneous": "متنوعة",
+SAUDI_NAMES = {
+    "1120": "الراجحي", "1150": "الإنماء",
+    "2222": "أرامكو", "2380": "بترو رابغ", "2381": "لوبريف", "2382": "أديس",
+    "4030": "البحري", "4031": "الخدمات الأرضية", "4200": "الدريس",
+    "1201": "تكوين", "1202": "مبكو", "1210": "بي سي آي", "1211": "معادن",
+    "1212": "أسترا", "1213": "نسيج", "1214": "شاكر", "1301": "أسلاك",
+    "1302": "بوان", "1303": "الصناعات الكهربائية", "1304": "اليمامة للحديد",
+    "1320": "أنابيب السعودية", "1321": "أنابيب الشرق", "1322": "أماك",
+    "2001": "كيمانول", "2010": "سابك", "2020": "سابك للمغذيات", "2060": "التصنيع",
+    "2090": "معدنية", "2150": "زجاج", "2170": "اللجين", "2180": "فيبكو",
+    "2200": "أنابيب", "2210": "نماء", "2220": "الوطنية", "2223": "لوبريف",
+    "2240": "الزامل", "2250": "المجموعة", "2290": "ينساب", "2300": "صناعة الورق",
+    "2310": "سبكيم", "2330": "المتقدمة", "2350": "كيان", "3002": "أسمنت نجران",
+    "3003": "أسمنت المدينة", "3004": "أسمنت الشمالية", "3005": "أسمنت أم القرى",
+    "3007": "الواحة", "3008": "الكثيري", "3010": "أسمنت العربية", "3020": "أسمنت اليمامة",
+    "3030": "أسمنت السعودية", "3040": "أسمنت القصيم", "3050": "أسمنت الجنوب",
+    "3060": "أسمنت ينبع", "3080": "أسمنت الشرقية", "3090": "أسمنت تبوك",
+    "3091": "أسمنت الجوف", "3092": "أسمنت الرياض",
+    "1810": "سيرا", "1820": "مجموعة الحكير", "1830": "وقت اللياقة", "1831": "مهارة",
+    "1832": "صدر", "1833": "الموارد", "1834": "سماسكو", "2040": "الخزف",
+    "2110": "الكابلات", "2140": "أيان", "2160": "أميانتيت", "2190": "سيسكو",
+    "2230": "الكيميائية", "2320": "البابطين", "2360": "الفخارية", "2370": "مسك",
+    "4110": "باتك", "4140": "صادرات", "4141": "العمران", "4142": "كابلات الرياض",
+    "4143": "تالكو", "4270": "طباعة وتغليف", "6004": "كاتريون",
+    "2130": "صدق", "2340": "العبداللطيف", "4011": "لازوردي", "4012": "الأصيل",
+    "4040": "سابتكو", "4170": "شمس", "4180": "مجموعة فتيحي", "4210": "الأبحاث والإعلام",
+    "4260": "بدجت", "4261": "ذيب", "4262": "لومي", "4263": "سال",
+    "4290": "الخليج للتدريب", "4291": "الوطنية للتعليم", "4292": "عطاء", "6002": "هرفي",
+    "2050": "صافولا", "2100": "وفرة", "2120": "متطورة", "2270": "سدافكو",
+    "2280": "المراعي", "2281": "تنمية", "2282": "نقي", "2283": "المطاحن الأولى",
+    "2284": "المطاحن الحديثة", "4001": "أسواق العثيم", "4003": "إكسترا",
+    "4006": "أسواق المزرعة", "4008": "ساكو", "4050": "ساسكو", "4051": "باعظيم",
+    "4160": "ثمار", "4161": "بن داود", "4162": "المنجم", "4163": "المطاحن الأولى",
+    "4164": "المطاحن الحديثة", "4165": "الماجدية", "4190": "جرير",
+    "4191": "أبو معطي", "4192": "السيف غاليري", "4240": "سينومي ريتيل",
+    "6001": "حلواني", "6010": "نادك", "6012": "ريدان", "6013": "التطويرية الغذائية",
+    "6014": "الآمار", "6015": "أمريكانا", "6016": "برغرايززر", "6020": "جاكو",
+    "6040": "تبوك الزراعية", "6050": "الأسماك", "6060": "الشرقية للتنمية",
+    "6070": "الجوف الزراعية", "6090": "جازادكو",
+    "2070": "الدوائية", "4002": "المواساة", "4004": "دلة الصحية", "4005": "رعاية",
+    "4007": "الحمادي", "4009": "السعودي الألماني", "4013": "الحبيب",
+    "4014": "أفالون", "4015": "جمجوم فارما", "4016": "الدواء", "4017": "فقيه الطبية",
+    "1182": "أملاك", "1183": "سهل", "4080": "سناد القابضة", "4081": "النايفات",
+    "4082": "مرنة", "4083": "تسهيل", "4130": "الباحة", "4280": "المملكة", "8313": "رسن",
+    "8010": "التعاونية", "8012": "جزيرة تكافل", "8020": "ملاذ", "8030": "ميدغلف",
+    "8040": "أليانز", "8050": "سلامة", "8060": "ولاء", "8070": "الدرع العربي",
+    "8100": "سايكو", "8120": "إتحاد الخليج", "8150": "أسيج", "8160": "التأمين العربية",
+    "8170": "الاتحاد", "8180": "الصقر", "8190": "المتحدة", "8200": "الإعادة",
+    "8210": "بوبا العربية", "8230": "تكافل الراجحي", "8240": "تشنب",
+    "8250": "جي آي جي", "8260": "الخليجية", "8270": "بروج", "8280": "ليفا",
+    "8300": "الوطنية", "8310": "أمانة", "8311": "عناية",
+    "2080": "الغاز", "2081": "الخريف", "2082": "أكوا باور", "2083": "مرافق",
+    "2084": "مياهنا", "5110": "كهرباء السعودية", "7010": "إس تي سي",
+    "7020": "اتحاد اتصالات", "7030": "زين السعودية", "7040": "عذيب",
+    "7200": "المعمر", "7201": "بحر العرب", "7202": "سلوشنز", "7203": "علم",
+    "7204": "توبي", "7211": "أفالون",
+    "4020": "العقارية", "4090": "طيبة", "4100": "مكة", "4150": "التعمير",
+    "4220": "إعمار", "4230": "البحر الأحمر", "4250": "جبل عمر", "4300": "دار الأركان",
+    "4310": "مدينة المعرفة", "4320": "الأندلس", "4321": "سينومي سنترز",
+    "4322": "رتال", "4323": "سمو", "4324": "بنان"
 }
 
 
-def _tr(value, mapping):
-    if not value:
-        return ""
-    return mapping.get(value, value)
+class GoogleSaudiStockParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_price_div = False
+        self.in_title_div = False
+        self.prices = []
+        self.company_name = ""
+        self.full_text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "div":
+            for k, v in attrs:
+                if k == "class" and v == "YMlKec fxKbKc":
+                    self.in_price_div = True
+                elif k == "class" and v == "zzDege":
+                    self.in_title_div = True
+
+    def handle_data(self, data):
+        clean_data = html.unescape(data).strip()
+        if not clean_data:
+            return
+        self.full_text.append(clean_data)
+        if self.in_price_div:
+            self.prices.append(clean_data)
+            self.in_price_div = False
+        if self.in_title_div:
+            self.company_name += clean_data
+            self.in_title_div = False
+
+    def handle_endtag(self, tag):
+        if tag == "div":
+            self.in_price_div = False
+            self.in_title_div = False
 
 
-def get_market_volume_leaders(limit: int = 50) -> List[Dict]:
-    def _scan(lang: Optional[str]):
-        q = (
-            Query()
-            .set_markets("ksa")
-            .select("name", "description", "close", "change", "volume",
-                    "average_volume_30d_calc", "sector", "industry",
-                    "price_52_week_high", "High.All",
-                    "price_52_week_low", "Low.All")
-            .order_by("volume", ascending=False)
-            .limit(limit)
-        )
-        if lang:
-            q = q.set_property("options", {"lang": lang})
-        return q.get_scanner_data()
-
+def is_excluded_saudi_entity(ticker, company_name):
+    if str(ticker) in ["1120", "1150"]:
+        return False
     try:
-        try:
-            _, df = _scan("ar")
-        except Exception as e:
-            logger.warning(f"Arabic scan failed, retrying default language: {e}")
-            _, df = _scan(None)
-    except Exception as e:
-        logger.warning(f"TradingView scanner failed: {e}")
-        return []
-
-    leaders = []
-    for _, r in df.iterrows():
-        symbol = str(r["name"])
-        _CACHE[symbol] = {
-            "name": _clean(r.get("description")) or symbol,
-            "price": _clean(r.get("close")) or 0,
-            "change_percent": _clean(r.get("change")) or 0,
-            "volume": _clean(r.get("volume")) or 0,
-            "avg_volume": _clean(r.get("average_volume_30d_calc")),
-            "sector": _tr(_clean(r.get("sector")), SECTOR_AR),
-            "industry": _tr(_clean(r.get("industry")), INDUSTRY_AR),
-            "high_52w": _clean(r.get("price_52_week_high")),
-            "high_all": _clean(r.get("High.All")),
-            "low_52w": _clean(r.get("price_52_week_low")),
-            "low_all": _clean(r.get("Low.All")),
-        }
-        leaders.append({"symbol": symbol})
-    return leaders
-
-
-def get_quote(symbol: str) -> Optional[Dict]:
-    d = _CACHE.get(symbol)
-    if not d:
-        return None
-    return {"name": d["name"], "price": d["price"],
-            "change_percent": d["change_percent"], "volume": d["volume"]}
-
-
-def get_company(symbol: str) -> Optional[Dict]:
-    d = _CACHE.get(symbol)
-    if not d:
-        return None
-    return {"sector_name": d["sector"], "industry": d["industry"]}
-
-
-def get_avg_volume(symbol: str, days: int = 20) -> Optional[float]:
-    d = _CACHE.get(symbol)
-    return d["avg_volume"] if d else None
-
-
-def run_screener() -> pd.DataFrame:
-    results = []
-    leaders = get_market_volume_leaders(limit=50)
-    
-    if not leaders:
-        logger.warning("No leaders returned from API or empty list.")
-        return pd.DataFrame()
-
-    symbols = [item.get("symbol") or item.get("code") for item in leaders if isinstance(item, dict)]
-    symbols = [s for s in symbols if s]
-
-    logger.info(f"Scanning {len(symbols)} active symbols safely...")
-
-    for symbol in symbols:
-        try:
-            quote = get_quote(symbol)
-            if not quote:
-                continue
-
-            change_pct = quote.get("change_percent") or quote.get("changePercent") or 0
-            volume = quote.get("volume") or 0
-            price = quote.get("price") or quote.get("close") or 0
-            name = quote.get("name") or quote.get("name_ar") or quote.get("name_en") or symbol
-
-            if price <= MIN_PRICE or volume < MIN_CURRENT_VOLUME or change_pct < MIN_CHANGE_PERCENT:
-                continue
-
-            avg_vol = get_avg_volume(symbol)
-            rvol = (volume / avg_vol) if avg_vol and avg_vol > 0 else None
-            
-            if rvol is not None and rvol < MIN_RVOL:
-                continue
-
-            company = get_company(symbol)
-            sector = ""
-            industry = ""
-
-            if company:
-                sector = company.get("sector_name") or company.get("sector_name_ar") or ""
-                industry = (
-                    company.get("industry")
-                    or company.get("industry_name")
-                    or company.get("industry_name_ar")
-                    or ""
-                )
-
-            results.append({
-                "Symbol": symbol,
-                "Name": name,
-                "Sector": sector,
-                "Industry": industry,
-                "Price": price,
-                "Change_Pct": change_pct,
-                "Volume": volume,
-                "RVOL": rvol or 1.0,
-            })
-
-            time_module.sleep(0.4)
-
-        except Exception as e:
-            logger.warning(f"{symbol}: {e}")
-            continue
-
-    df = pd.DataFrame(results)
-    if not df.empty:
-        df = df.sort_values("Change_Pct", ascending=False)
-    return df
-
-
-STATE_FILE = "alerts_count.json"
-
-
-def _today_riyadh() -> str:
-    return datetime.now(pytz.timezone("Asia/Riyadh")).strftime("%Y-%m-%d")
-
-
-def load_counts() -> Dict[str, int]:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        if state.get("date") == _today_riyadh():
-            return state.get("counts", {})
-    except Exception:
+        code = int(ticker)
+        if (1010 <= code <= 1183) or (4330 <= code <= 4349) or (code >= 9400):
+            return True
+    except ValueError:
         pass
-    return {}
+    excluded_words = ["bank", "reit", "etf", "fund", "مصرف", "بنك", "ريت"]
+    return any(w in company_name.lower() for w in excluded_words)
 
 
-def save_counts(counts: Dict[str, int]):
+def clean_saudi_price(price_str):
+    if not price_str:
+        return None
+    try:
+        cleaned = price_str.replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def is_saudi_market_open():
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        return True
+    ksa_tz = timezone(timedelta(hours=3))
+    now_ksa = datetime.now(ksa_tz)
+    if now_ksa.weekday() in:
+        return False
+    current_minutes = now_ksa.hour * 60 + now_ksa.minute
+    if current_minutes < (10 * 60) or current_minutes > (15 * 60 + 25):
+        return False
+    return True
+
+
+def fetch_saudi_stock(ticker):
+    url = f"https://google.com{ticker}:TADAWUL?hl=en"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            html_content = response.read().decode("utf-8")
+
+        parser = GoogleSaudiStockParser()
+        parser.feed(html_content)
+
+        if not parser.prices or is_excluded_saudi_entity(ticker, parser.company_name):
+            return None
+
+        price = clean_saudi_price(parser.prices[0])
+        if not price:
+            return None
+
+        pct_change = 0.0
+        for word in parser.full_text:
+            if word.endswith("%") and "(" not in word and any(c.isdigit() for c in word):
+                try:
+                    if "-" not in word:
+                        val = float(word.replace("%", "").replace("+", "").strip())
+                        if val > 0:
+                            pct_change = val
+                            break
+                except ValueError:
+                    continue
+
+        if pct_change <= 0:
+            return None
+
+        return {
+            "ticker": ticker,
+            "name": SAUDI_NAMES.get(ticker, ""),
+            "price": price,
+            "pct": pct_change
+        }
+    except Exception:
+        return None
+
+
+def has_market_changed(valid_stocks):
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        return True
+
+    new_snapshot = {
+        item["ticker"]: {"price": item["price"], "pct": item["pct"]}
+        for item in valid_stocks
+    }
+
+    old_snapshot = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                old_snapshot = json.load(f)
+        except Exception:
+            old_snapshot = {}
+
+    if new_snapshot == old_snapshot:
+        return False
+
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"date": _today_riyadh(), "counts": counts}, f, ensure_ascii=False)
-    except Exception as e:
-        logger.warning(f"Could not save alert counts: {e}")
+            json.dump(new_snapshot, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+    return True
 
 
-def format_message(df: pd.DataFrame, counts: Optional[Dict[str, int]] = None) -> Optional[str]:
-    if df.empty:
-        return None
+def build_saudi_telegram_messages(stocks_list):
+    ksa_tz = timezone(timedelta(hours=3))
+    current_time = datetime.now(ksa_tz).strftime("%H:%M")
 
-    if counts is None:
-        counts = {}
+    header = [
+        "🚨 <b>Tadawul Market Movers</b>",
+        f"⏰ <code>{current_time}</code>",
+        ""
+    ]
+    footer = [
+        "",
+        "📊 المصدر: Google Finance"
+    ]
 
-    msg = f"🇸🇦 *تنبيهات السوق السعودي*\n"
-    msg += f"⏰ {get_riyadh_time()}\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    sorted_stocks = sorted(stocks_list, key=lambda x: x["pct"], reverse=True)
+    stock_lines = []
 
-    for row in df.itertuples():
-        tv_link = f"https://www.tradingview.com/chart/?symbol=TADAWUL:{row.Symbol}"
+    for idx, item in enumerate(sorted_stocks, start=1):
+        t = item["ticker"]
+        name = item["name"]
+        p = item["price"]
+        pct = item["pct"]
 
-        counts[row.Symbol] = counts.get(row.Symbol, 0) + 1
+        tv_url = f"https://tradingview.com:{t}"
+        label = f"{t} {name}".strip()
+        p_str = f"{p:.2f} SAR"
+        pct_str = f"{pct:.2f}%"
 
-        msg += f"🔔 *تنبيه #{counts[row.Symbol]}*\n"
-        msg += f"الرمز: `{row.Symbol}`\n"
-        msg += f"السعر الحالي: `{row.Price:.2f}`\n"
-        msg += f"نسبة التغيير: `{row.Change_Pct:+.2f}%`\n"
-        msg += f"{row.Name}\n"
-        msg += f"القطاع: `{row.Sector or '-'}`\n"
-        msg += f"الصناعة: `{row.Industry or '-'}`\n"
-        msg += f"الحجم: `{row.Volume:,}`\n"
-        extra = _CACHE.get(row.Symbol, {})
-
-        def _f(v):
-            return f"{v:.2f}" if isinstance(v, (int, float)) else "-"
-
-        msg += f"قمة 52 اسبوع: `{_f(extra.get('high_52w'))}`\n"
-        msg += f"القمة التاريخية: `{_f(extra.get('high_all'))}`\n"
-        msg += f"قاع 52 اسبوع: `{_f(extra.get('low_52w'))}`\n"
-        msg += f"القاع التاريخي: `{_f(extra.get('low_all'))}`\n"
-        msg += f"[شارت TradingView]({tv_link})\n"
-        msg += "────────────────────\n\n"
-
-    return msg
-
-
-def send_telegram(text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    sep = "────────────────────\n\n"
-
-    chunks, current = [], ""
-    for block in text.split(sep):
-        if not block.strip():
-            continue
-        part = block + sep
-        if len(current) + len(part) > 3800:
-            chunks.append(current)
-            current = ""
-        current += part
-    if current:
-        chunks.append(current)
-
-    for chunk in chunks:
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": chunk,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True,
-        }
-        r = requests.post(url, json=payload, timeout=15)
-        if r.status_code == 400:
-            logger.warning(f"Telegram 400: {r.text}")
-            payload.pop("parse_mode")
-            r = requests.post(url, json=payload, timeout=15)
-        r.raise_for_status()
-        time_module.sleep(1)
-    logger.info("Message sent to Telegram successfully")
-
-
-def main():
-    if not all([TELEGRAM_TOKEN, CHAT_ID, API_KEY]):
-        raise ValueError("Missing secrets: TELEGRAM_TOKEN, CHAT_ID, or API_KEY")
-
-    logger.info(f"Starting scan at {get_riyadh_time()}")
-    df = run_screener()
-    counts = load_counts()
-    msg = format_message(df, counts)
-
-    if msg:
-        send_telegram(msg)
-        save_counts(counts)
-        logger.info(f"Found {len(df)} stocks and sent to Telegram")
-    else:
-        logger.info("No stocks matched criteria.")
-
-
-if __name__ == "__main__":
-    main()
+        line = (
+            f'{idx}. <a href="{tv_url}"><b><code>{label}</code></b></a>  ·  '
