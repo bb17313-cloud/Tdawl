@@ -125,7 +125,7 @@ def clean_saudi_price(price_str):
     if not price_str:
         return None
     try:
-        cleaned = price_str.replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
+        cleaned = str(price_str).replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
         return float(cleaned)
     except ValueError:
         return None
@@ -149,10 +149,11 @@ def fetch_saudi_stock(ticker):
         parser = GoogleSaudiStockParser()
         parser.feed(html_content)
 
-        if not parser.prices or is_excluded_saudi_entity(ticker, parser.company_name):
+        first_price = next(iter(parser.prices), None)
+        if not first_price or is_excluded_saudi_entity(ticker, parser.company_name):
             return None
 
-        price = clean_saudi_price(parser.prices)
+        price = clean_saudi_price(first_price)
         if not price:
             return None
 
@@ -233,6 +234,3 @@ def build_saudi_telegram_messages(stocks_list):
         if current_length + len(line) + 50 > 3800:
             current_chunk.extend(footer)
             messages.append("\n".join(current_chunk))
-            current_chunk = ["🚨 <b>Tadawul Market Movers (تابع)</b>", f"⏰ <code>{current_time}</code>", "", line]
-            current_length = sum(len(l) + 1 for l in current_chunk)
-        else:
