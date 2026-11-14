@@ -107,8 +107,12 @@ class GoogleSaudiStockParser(HTMLParser):
 
 
 def fetch_saudi_stock(ticker):
-    url = f"https://google.com{ticker}:TADAWUL?hl=en"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "en-US,en;q=0.9"}
+    url = f"https://google.com{ticker}:TDWL?hl=en"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cookie": "CONSENT=YES+cb.20210720-07-p0.en+FX+410; SOCS=CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg"
+    }
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -156,7 +160,7 @@ def send_to_telegram(message_text):
 
 
 def main():
-    print("Scanning Saudi Market...")
+    print("Scanning Saudi Market (TDWL)...")
     valid_stocks = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fetch_saudi_stock, t): t for t in SAUDI_NAMES.keys()}
@@ -192,8 +196,3 @@ def main():
             current_length += len(line) + 1
     if len(current_chunk) > len(header):
         current_chunk.extend(footer)
-        send_to_telegram("\n".join(current_chunk))
-
-
-if __name__ == "__main__":
-    main()
