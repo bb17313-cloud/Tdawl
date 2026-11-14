@@ -109,7 +109,7 @@ class GoogleSaudiStockParser(HTMLParser):
 
 
 def is_excluded_saudi_entity(ticker, company_name):
-    if str(ticker) in ["1120", "1150"]:
+    if str(ticker) in ("1120", "1150"):
         return False
     try:
         code = int(ticker)
@@ -117,7 +117,7 @@ def is_excluded_saudi_entity(ticker, company_name):
             return True
     except ValueError:
         pass
-    excluded_words = ["bank", "reit", "etf", "fund", "مصرف", "بنك", "ريت"]
+    excluded_words = ("bank", "reit", "etf", "fund", "مصرف", "بنك", "ريت")
     return any(w in company_name.lower() for w in excluded_words)
 
 
@@ -132,16 +132,8 @@ def clean_saudi_price(price_str):
 
 
 def is_saudi_market_open():
-    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-        return True
-    ksa_tz = timezone(timedelta(hours=3))
-    now_ksa = datetime.now(ksa_tz)
-    if now_ksa.weekday() in (4, 5):
-        return False
-    current_minutes = now_ksa.hour * 60 + now_ksa.minute
-    if current_minutes < 600 or current_minutes > 925:
-        return False
     return True
+
 
 def fetch_saudi_stock(ticker):
     url = f"https://google.com{ticker}:TADAWUL?hl=en"
@@ -160,7 +152,7 @@ def fetch_saudi_stock(ticker):
         if not parser.prices or is_excluded_saudi_entity(ticker, parser.company_name):
             return None
 
-        price = clean_saudi_price(parser.prices[0])
+        price = clean_saudi_price(parser.prices)
         if not price:
             return None
 
@@ -179,12 +171,7 @@ def fetch_saudi_stock(ticker):
         if pct_change <= 0:
             return None
 
-        return {
-            "ticker": ticker,
-            "name": SAUDI_NAMES.get(ticker, ""),
-            "price": price,
-            "pct": pct_change
-        }
+        return {"ticker": ticker, "name": SAUDI_NAMES.get(ticker, ""), "price": price, "pct": pct_change}
     except Exception:
         return None
 
@@ -193,11 +180,7 @@ def has_market_changed(valid_stocks):
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         return True
 
-    new_snapshot = {
-        item["ticker"]: {"price": item["price"], "pct": item["pct"]}
-        for item in valid_stocks
-    }
-
+    new_snapshot = {item["ticker"]: {"price": item["price"], "pct": item["pct"]} for item in valid_stocks}
     old_snapshot = {}
     if os.path.exists(STATE_FILE):
         try:
@@ -222,15 +205,8 @@ def build_saudi_telegram_messages(stocks_list):
     ksa_tz = timezone(timedelta(hours=3))
     current_time = datetime.now(ksa_tz).strftime("%H:%M")
 
-    header = [
-        "🚨 <b>Tadawul Market Movers</b>",
-        f"⏰ <code>{current_time}</code>",
-        ""
-    ]
-    footer = [
-        "",
-        "📊 المصدر: Google Finance"
-    ]
+    header = ["🚨 <b>Tadawul Market Movers</b>", f"⏰ <code>{current_time}</code>", ""]
+    footer = ["", "📊 المصدر: Google Finance"]
 
     sorted_stocks = sorted(stocks_list, key=lambda x: x["pct"], reverse=True)
     stock_lines = []
@@ -246,5 +222,17 @@ def build_saudi_telegram_messages(stocks_list):
         p_str = f"{p:.2f} SAR"
         pct_str = f"{pct:.2f}%"
 
-        line = (
-            f'{idx}. <a href="{tv_url}"><b><code>{label}</code></b></a>  ·  '
+        line = f'{idx}. <a href="{tv_url}"><b><code>{label}</code></b></a>  ·  <code>{p_str}</code>  ·  <code>{pct_str}</code>'
+        stock_lines.append(line)
+
+    messages = []
+    current_chunk = list(header)
+    current_length = sum(len(l) + 1 for l in current_chunk)
+
+    for line in stock_lines:
+        if current_length + len(line) + 50 > 3800:
+            current_chunk.extend(footer)
+            messages.append("\n".join(current_chunk))
+            current_chunk = ["🚨 <b>Tadawul Market Movers (تابع)</b>", f"⏰ <code>{current_time}</code>", "", line]
+            current_length = sum(len(l) + 1 for l in current_chunk)
+        else:
