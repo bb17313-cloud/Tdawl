@@ -116,14 +116,19 @@ def fetch_saudi_stock(ticker):
             parser = GoogleSaudiStockParser()
             parser.feed(html_content)
             
-            # تشخيص
-            print(f"[{ticker}] prices: {parser.prices}")
-            
             first_price = next(iter(parser.prices), None)
             if not first_price:
                 continue
             
-            cleaned = str(first_price).replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
+            cleaned = (
+                str(first_price)
+                .replace("SAR", "")
+                .replace("ر.س", "")
+                .replace(",", "")
+                .replace("\xa0", "")
+                .replace("\u00a0", "")
+                .strip()
+            )
             try:
                 price = float(cleaned)
             except:
@@ -140,6 +145,7 @@ def fetch_saudi_stock(ticker):
                         .replace("−", "-")
                         .replace("–", "-")
                         .replace("—", "-")
+                        .replace("\xa0", "")
                         .strip()
                     )
                     try:
