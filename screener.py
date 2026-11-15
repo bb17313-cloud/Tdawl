@@ -110,7 +110,7 @@ def fetch_saudi_stock(ticker):
         }
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=12) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 html_content = response.read().decode("utf-8")
 
             parser = GoogleSaudiStockParser()
@@ -134,25 +134,22 @@ def fetch_saudi_stock(ticker):
             except:
                 continue
 
-            # استخراج النسبة بطريقة قوية
+            # استخراج النسبة بدقة (فقط النسب المنطقية للسوق السعودي)
             pct_change = 0.0
             joined = " ".join(parser.full_text)
-            matches = re.findall(r'([+\-−–—]?\d+\.?\d*)\s*%', joined)
+            matches = re.findall(r'([+\-−–—]?\d{1,2}\.\d{1,2})\s*%', joined)
 
+            candidates = []
             for m in matches:
                 try:
-                    val = float(
-                        m.replace("−", "-")
-                         .replace("–", "-")
-                         .replace("—", "-")
-                    )
-                    if val > 0:
-                        pct_change = val
-                        break
-                    elif val < 0:
-                        return None
+                    val = float(m.replace("−", "-").replace("–", "-").replace("—", "-"))
+                    if 0.15 <= val <= 10.50:
+                        candidates.append(val)
                 except:
                     continue
+
+            if candidates:
+                pct_change = min(candidates)  # أقرب نسبة منطقية
 
             if pct_change <= 0:
                 return None
@@ -248,34 +245,25 @@ def main():
     ksa_tz = timezone(timedelta(hours=3))
     current_time = datetime.now(ksa_tz).strftime("%H:%M")
 
+    sorted_stocks = sorted(valid_stocks, key=lambda x: x["pct"], reverse=True)
+    top_stocks = sorted_stocks[:15]
+
     header = [
         "🚨 <b>Tadawul Market Movers</b>",
         f"⏰ <code>{current_time}</code>",
         ""
     ]
+
+    lines = []
+    for stock in top_stocks:
+        tv_link = f"https://www.tradingview.com/symbols/TADAWUL-{stock['ticker']}/"
+        line = f"🟢 <b><a href=\"{tv_link}\">{stock['ticker']}</a></b> {stock['name']} | {stock['price']:.2f} | <b>+{stock['pct']:.2f}%</b>"
+        lines.append(line)
+
     footer = ["", "📊 المصدر: Google Finance"]
 
-    sorted_stocks = sorted(valid_stocks, key=lambda x: x["pct"], reverse=True)
-
-    messages = []
-    current_chunk = list(header)
-
-    for stock in sorted_stocks:
-        line = f"🟢 <b>{stock['ticker']}</b> {stock['name']} | {stock['price']:.2f} | <b>+{stock['pct']:.2f}%</b>"
-
-        if sum(len(s) for s in current_chunk) + len(line) > 3800:
-            current_chunk.extend(footer)
-            messages.append("\n".join(current_chunk))
-            current_chunk = list(header)
-
-        current_chunk.append(line)
-
-    current_chunk.extend(footer)
-    messages.append("\n".join(current_chunk))
-
-    for msg in messages:
-        send_to_telegram(msg)
-        time.sleep(1)
+    message = "\n".join(header + lines + footer)
+    send_to_telegram(message)
 
 
 if __name__ == "__main__":
