@@ -110,7 +110,7 @@ class GoogleSaudiStockParser(HTMLParser):
 
 def fetch_saudi_stock(ticker):
     for exch in ("TADAWUL", "TDWL"):
-        url = f"https://google.com{ticker}:{exch}?hl=en"
+        url = f"https://www.google.com/finance/quote/{ticker}:{exch}?hl=en"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
@@ -175,8 +175,13 @@ def send_to_telegram(message_text):
     if not bot_token or not chat_id:
         print("Missing secrets")
         return
-    url = f"https://telegram.org{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message_text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
     data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data)
     with urllib.request.urlopen(req, timeout=15) as response:
@@ -193,15 +198,44 @@ def main():
             res = future.result()
             if res:
                 valid_stocks.append(res)
+    
     print("Rising stocks count:", len(valid_stocks))
     if not valid_stocks:
+        print("No rising stocks found.")
         return
+    
     if not has_market_changed(valid_stocks):
         print("No price updates since last run.")
         return
+    
     ksa_tz = timezone(timedelta(hours=3))
     current_time = datetime.now(ksa_tz).strftime("%H:%M")
+    
     header = ["🚨 <b>Tadawul Market Movers</b>", f"⏰ <code>{current_time}</code>", ""]
     footer = ["", "📊 المصدر: Google Finance"]
+    
     sorted_stocks = sorted(valid_stocks, key=lambda x: x["pct"], reverse=True)
+    
+    # بناء الرسالة (تقسيمها لو طويلة)
     current_chunk = list(header)
+    messages = []
+    
+    for stock in sorted_stocks:
+        line = f"🟢 <b>{stock['ticker']}</b> {stock['name']} | {stock['price']:.2f} | <b>+{stock['pct']:.2f}%</b>"
+        # تيليجرام حد الرسالة 4096 حرف
+        if sum(len(s) for s in current_chunk) + len(line) > 3800:
+            current_chunk.extend(footer)
+            messages.append("\n".join(current_chunk))
+            current_chunk = list(header)
+        current_chunk.append(line)
+    
+    current_chunk.extend(footer)
+    messages.append("\n".join(current_chunk))
+    
+    for msg in messages:
+        send_to_telegram(msg)
+        time.sleep(1)  # عشان ما ينحظر من تيليجرام
+
+
+if __name__ == "__main__":
+    main() او
