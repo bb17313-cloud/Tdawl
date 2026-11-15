@@ -107,7 +107,6 @@ def fetch_saudi_stock(ticker):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
-            "Cookie": "CONSENT=YES+cb.20210720-07-p0.en+FX+410; SOCS=CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg"
         }
         try:
             req = urllib.request.Request(url, headers=headers)
@@ -116,6 +115,9 @@ def fetch_saudi_stock(ticker):
             
             parser = GoogleSaudiStockParser()
             parser.feed(html_content)
+            
+            # تشخيص
+            print(f"[{ticker}] prices: {parser.prices}")
             
             first_price = next(iter(parser.prices), None)
             if not first_price:
@@ -159,7 +161,8 @@ def fetch_saudi_stock(ticker):
                 "price": price,
                 "pct": pct_change
             }
-        except Exception:
+        except Exception as e:
+            print(f"[{ticker}] error: {e}")
             continue
     return None
 
@@ -221,7 +224,7 @@ def main():
     print("Scanning Saudi Market...")
     valid_stocks = []
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
             executor.submit(fetch_saudi_stock, t): t
             for t in SAUDI_NAMES.keys()
