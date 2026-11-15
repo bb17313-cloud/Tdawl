@@ -2,6 +2,7 @@ import os
 import time
 import html
 import json
+import re
 import urllib.request
 import urllib.parse
 from html.parser import HTMLParser
@@ -78,7 +79,6 @@ class GoogleSaudiStockParser(HTMLParser):
         super().__init__()
         self.in_price_div = False
         self.prices = []
-        self.pcts = []
         self.full_text = []
 
     def handle_starttag(self, tag, attrs):
@@ -112,14 +112,14 @@ def fetch_saudi_stock(ticker):
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=12) as response:
                 html_content = response.read().decode("utf-8")
-            
+
             parser = GoogleSaudiStockParser()
             parser.feed(html_content)
-            
+
             first_price = next(iter(parser.prices), None)
             if not first_price:
                 continue
-            
+
             cleaned = (
                 str(first_price)
                 .replace("SAR", "")
@@ -133,42 +133,37 @@ def fetch_saudi_stock(ticker):
                 price = float(cleaned)
             except:
                 continue
-            
+
+            # استخراج النسبة بطريقة قوية
             pct_change = 0.0
-            for word in parser.full_text:
-                if "%" in word and any(c.isdigit() for c in word):
-                    clean_w = (
-                        word.replace("(", "")
-                        .replace(")", "")
-                        .replace("%", "")
-                        .replace("+", "")
-                        .replace("−", "-")
-                        .replace("–", "-")
-                        .replace("—", "-")
-                        .replace("\xa0", "")
-                        .strip()
+            joined = " ".join(parser.full_text)
+            matches = re.findall(r'([+\-−–—]?\d+\.?\d*)\s*%', joined)
+
+            for m in matches:
+                try:
+                    val = float(
+                        m.replace("−", "-")
+                         .replace("–", "-")
+                         .replace("—", "-")
                     )
-                    try:
-                        val = float(clean_w)
-                        if val > 0:
-                            pct_change = val
-                            break
-                        elif val < 0:
-                            return None
-                    except ValueError:
-                        continue
-            
+                    if val > 0:
+                        pct_change = val
+                        break
+                    elif val < 0:
+                        return None
+                except:
+                    continue
+
             if pct_change <= 0:
                 return None
-            
+
             return {
                 "ticker": ticker,
                 "name": SAUDI_NAMES.get(ticker, ""),
                 "price": price,
                 "pct": pct_change
             }
-        except Exception as e:
-            print(f"[{ticker}] error: {e}")
+        except Exception:
             continue
     return None
 
