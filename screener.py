@@ -76,26 +76,29 @@ SAUDI_NAMES = {
 class GoogleSaudiStockParser(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.in_price = False
+        self.in_price_div = False
         self.prices = []
+        self.pcts = []
         self.full_text = []
 
     def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
-        if "N6SYTe" in attrs_dict.get("class", ""):
-            self.in_price = True
+        if tag in ("div", "span"):
+            for k, v in attrs:
+                if k == "class" and "N6SYTe" in v:
+                    self.in_price_div = True
 
     def handle_data(self, data):
-        clean = html.unescape(data).strip()
-        if not clean:
+        clean_data = html.unescape(data).strip()
+        if not clean_data:
             return
-        self.full_text.append(clean)
-        if self.in_price:
-            self.prices.append(clean)
-            self.in_price = False
+        self.full_text.append(clean_data)
+        if self.in_price_div:
+            self.prices.append(clean_data)
+            self.in_price_div = False
 
     def handle_endtag(self, tag):
-        self.in_price = False
+        if tag in ("div", "span"):
+            self.in_price_div = False
 
 
 def fetch_saudi_stock(ticker):
@@ -109,25 +112,21 @@ def fetch_saudi_stock(ticker):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=12) as response:
-                content = response.read().decode("utf-8")
-
+                html_content = response.read().decode("utf-8")
+            
             parser = GoogleSaudiStockParser()
-            parser.feed(content)
-
-            # استخراج السعر
-            price = None
-            for p in parser.prices:
-                cleaned = p.replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
-                try:
-                    price = float(cleaned)
-                    break
-                except:
-                    continue
-
-            if price is None:
+            parser.feed(html_content)
+            
+            first_price = next(iter(parser.prices), None)
+            if not first_price:
                 continue
-
-            # استخراج النسبة
+            
+            cleaned = str(first_price).replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
+            try:
+                price = float(cleaned)
+            except:
+                continue
+            
             pct_change = 0.0
             for word in parser.full_text:
                 if "%" in word and any(c.isdigit() for c in word):
@@ -148,22 +147,20 @@ def fetch_saudi_stock(ticker):
                             break
                         elif val < 0:
                             return None
-                    except:
+                    except ValueError:
                         continue
-
+            
             if pct_change <= 0:
                 return None
-
+            
             return {
                 "ticker": ticker,
                 "name": SAUDI_NAMES.get(ticker, ""),
                 "price": price,
                 "pct": pct_change
             }
-
         except Exception:
             continue
-
     return None
 
 
