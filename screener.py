@@ -78,29 +78,18 @@ class GoogleSaudiStockParser(HTMLParser):
         super().__init__()
         self.in_price = False
         self.prices = []
-        self.pcts = []
         self.full_text = []
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
-        cls = attrs_dict.get("class", "")
-        jsname = attrs_dict.get("jsname", "")
-
-        # السعر الجديد
-        if "N6SYTe" in cls:
+        if "N6SYTe" in attrs_dict.get("class", ""):
             self.in_price = True
-
-        # النسبة المئوية (أكثر ثباتاً)
-        if jsname == "vY9t3b":
-            self.in_pct = True
 
     def handle_data(self, data):
         clean = html.unescape(data).strip()
         if not clean:
             return
-
         self.full_text.append(clean)
-
         if self.in_price:
             self.prices.append(clean)
             self.in_price = False
