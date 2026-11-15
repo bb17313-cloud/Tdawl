@@ -76,36 +76,37 @@ SAUDI_NAMES = {
 class GoogleSaudiStockParser(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.in_price_div = False
-        self.in_pct_div = False
+        self.in_price = False
         self.prices = []
         self.pcts = []
         self.full_text = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("div", "span"):
-            for k, v in attrs:
-                if k == "class" and "YMlKec" in v and "fxKbKc" in v:
-                    self.in_price_div = True
-                elif k == "class" and "JwB6zf" in v:
-                    self.in_pct_div = True
+        attrs_dict = dict(attrs)
+        cls = attrs_dict.get("class", "")
+        jsname = attrs_dict.get("jsname", "")
+
+        # السعر الجديد
+        if "N6SYTe" in cls:
+            self.in_price = True
+
+        # النسبة المئوية (أكثر ثباتاً)
+        if jsname == "vY9t3b":
+            self.in_pct = True
 
     def handle_data(self, data):
-        clean_data = html.unescape(data).strip()
-        if not clean_data:
+        clean = html.unescape(data).strip()
+        if not clean:
             return
-        self.full_text.append(clean_data)
-        if self.in_price_div:
-            self.prices.append(clean_data)
-            self.in_price_div = False
-        if self.in_pct_div:
-            self.pcts.append(clean_data)
-            self.in_pct_div = False
+
+        self.full_text.append(clean)
+
+        if self.in_price:
+            self.prices.append(clean)
+            self.in_price = False
 
     def handle_endtag(self, tag):
-        if tag in ("div", "span"):
-            self.in_price_div = False
-            self.in_pct_div = False
+        self.in_price = False
 
 
 def fetch_saudi_stock(ticker):
@@ -118,19 +119,39 @@ def fetch_saudi_stock(ticker):
         }
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                html_content = response.read().decode("utf-8")
+            with urllib.request.urlopen(req, timeout=12) as response:
+                content = response.read().decode("utf-8")
+
             parser = GoogleSaudiStockParser()
-            parser.feed(html_content)
-            first_price = next(iter(parser.prices), None)
-            if not first_price:
+            parser.feed(content)
+
+            # استخراج السعر
+            price = None
+            for p in parser.prices:
+                cleaned = p.replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
+                try:
+                    price = float(cleaned)
+                    break
+                except:
+                    continue
+
+            if price is None:
                 continue
-            cleaned = str(first_price).replace("SAR", "").replace("ر.س", "").replace(",", "").strip()
-            price = float(cleaned)
+
+            # استخراج النسبة
             pct_change = 0.0
-            for word in (parser.pcts + parser.full_text):
+            for word in parser.full_text:
                 if "%" in word and any(c.isdigit() for c in word):
-                    clean_w = word.replace("(", "").replace(")", "").replace("%", "").replace("+", "").strip()
+                    clean_w = (
+                        word.replace("(", "")
+                        .replace(")", "")
+                        .replace("%", "")
+                        .replace("+", "")
+                        .replace("−", "-")
+                        .replace("–", "-")
+                        .replace("—", "-")
+                        .strip()
+                    )
                     try:
                         val = float(clean_w)
                         if val > 0:
@@ -138,43 +159,62 @@ def fetch_saudi_stock(ticker):
                             break
                         elif val < 0:
                             return None
-                    except ValueError:
+                    except:
                         continue
+
             if pct_change <= 0:
                 return None
-            return {"ticker": ticker, "name": SAUDI_NAMES.get(ticker, ""), "price": price, "pct": pct_change}
+
+            return {
+                "ticker": ticker,
+                "name": SAUDI_NAMES.get(ticker, ""),
+                "price": price,
+                "pct": pct_change
+            }
+
         except Exception:
             continue
+
     return None
 
 
 def has_market_changed(valid_stocks):
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         return True
-    new_snapshot = {item["ticker"]: {"price": item["price"], "pct": item["pct"]} for item in valid_stocks}
+
+    new_snapshot = {
+        item["ticker"]: {"price": item["price"], "pct": item["pct"]}
+        for item in valid_stocks
+    }
+
     old_snapshot = {}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 old_snapshot = json.load(f)
-        except Exception:
+        except:
             old_snapshot = {}
+
     if new_snapshot == old_snapshot:
         return False
+
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(new_snapshot, f, ensure_ascii=False)
-    except Exception:
+    except:
         pass
+
     return True
 
 
 def send_to_telegram(message_text):
     bot_token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("CHAT_ID")
+
     if not bot_token or not chat_id:
         print("Missing secrets")
         return
+
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -182,8 +222,10 @@ def send_to_telegram(message_text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
+
     data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data)
+
     with urllib.request.urlopen(req, timeout=15) as response:
         res = json.loads(response.read().decode("utf-8"))
         print("Telegram Sent:", res.get("ok"))
@@ -192,49 +234,58 @@ def send_to_telegram(message_text):
 def main():
     print("Scanning Saudi Market...")
     valid_stocks = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_saudi_stock, t): t for t in SAUDI_NAMES.keys()}
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(fetch_saudi_stock, t): t
+            for t in SAUDI_NAMES.keys()
+        }
         for future in as_completed(futures):
             res = future.result()
             if res:
                 valid_stocks.append(res)
-    
+
     print("Rising stocks count:", len(valid_stocks))
+
     if not valid_stocks:
         print("No rising stocks found.")
         return
-    
+
     if not has_market_changed(valid_stocks):
         print("No price updates since last run.")
         return
-    
+
     ksa_tz = timezone(timedelta(hours=3))
     current_time = datetime.now(ksa_tz).strftime("%H:%M")
-    
-    header = ["🚨 <b>Tadawul Market Movers</b>", f"⏰ <code>{current_time}</code>", ""]
+
+    header = [
+        "🚨 <b>Tadawul Market Movers</b>",
+        f"⏰ <code>{current_time}</code>",
+        ""
+    ]
     footer = ["", "📊 المصدر: Google Finance"]
-    
+
     sorted_stocks = sorted(valid_stocks, key=lambda x: x["pct"], reverse=True)
-    
-    # بناء الرسالة (تقسيمها لو طويلة)
-    current_chunk = list(header)
+
     messages = []
-    
+    current_chunk = list(header)
+
     for stock in sorted_stocks:
         line = f"🟢 <b>{stock['ticker']}</b> {stock['name']} | {stock['price']:.2f} | <b>+{stock['pct']:.2f}%</b>"
-        # تيليجرام حد الرسالة 4096 حرف
+
         if sum(len(s) for s in current_chunk) + len(line) > 3800:
             current_chunk.extend(footer)
             messages.append("\n".join(current_chunk))
             current_chunk = list(header)
+
         current_chunk.append(line)
-    
+
     current_chunk.extend(footer)
     messages.append("\n".join(current_chunk))
-    
+
     for msg in messages:
         send_to_telegram(msg)
-        time.sleep(1)  # عشان ما ينحظر من تيليجرام
+        time.sleep(1)
 
 
 if __name__ == "__main__":
